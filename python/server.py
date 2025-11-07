@@ -11,7 +11,24 @@ from flask import Flask, request, jsonify, send_file, make_response
 app = Flask(__name__)
 semaforo_clientes = threading.Semaphore(2)
 semaforo_processos = threading.Semaphore(5)
-modelos = {}
+
+DATA_CACHE = {}
+MODEL_FILES = ['H_60x60.csv','H_30x30.csv']
+SIGNAL_FILES = [
+    'sinal_1_60x60.csv', 'sinal_2_60x60.csv', 'sinal_3_60x60.csv',
+    'sinal_1_30x30.csv', 'sinal_2_30x30.csv', 'sinal_3_30x30.csv'
+]
+
+def pre_load_data():
+    print("=== INICIANDO PRÉ-CARREGAMENTO DE DADOS ===")
+    all_files = list(set(MODEL_FILES + SIGNAL_FILES)) 
+    for f in all_files:
+        try:
+            DATA_CACHE[f] = np.loadtxt(f, delimiter=',', dtype=np.float64)
+            print(f" - [CACHE] {f} carregado com sucesso.")
+        except Exception as e:
+            print(f"[ERRO CACHE] Falha ao carregar {f}. Servidor pode falhar. Erro: {e}")
+    print("=== PRÉ-CARREGAMENTO CONCLUÍDO ===")
 
 MAX_ITERATIONS = 10
 ERROR_TOLERANCE = 1e-4
@@ -134,7 +151,6 @@ def execute_cgnr(H: np.ndarray, g: np.ndarray):
         error_absolute = np.linalg.norm(r_next, ord=2)
         error_relative = abs(error_absolute - np.linalg.norm(r, ord=2))
         
-
         if error_absolute < ERROR_TOLERANCE or error_relative < ERROR_TOLERANCE:
             print(f"Convergência atingida na iteração {i+1}")
             print(f"Erro absoluto: {error_absolute:.2e}, Erro relativo: {error_relative:.2e}")
@@ -161,6 +177,8 @@ def execute_cgnr(H: np.ndarray, g: np.ndarray):
         
     print(f"Reconstrução concluída em {i+1} iterações (z-score)")
     return f_final, i+1
+
+
 @app.post("/interpretedServer/reconstruct")
 def reconstruct():
     with semaforo_clientes:
@@ -174,14 +192,13 @@ def reconstruct():
 
         with semaforo_processos:
             try:
-                if model in modelos:
-                    H = modelos[model]
-                else:
-                    H = np.loadtxt(model, delimiter=',', dtype=np.float64)
-                    modelos[model] = H
+                H = DATA_CACHE.get(model)
+                g = DATA_CACHE.get(sinal)
 
-                g = np.loadtxt(sinal, delimiter=',', dtype=np.float64)
-
+                if H is None or g is None:
+                    print(f"[ERRO] {model} ou {sinal} não encontrado no cache.")
+                    return jsonify({'error': 'Dados não encontrados no cache do servidor'}), 404
+        
                 if "CGNE".lower() == algorithm.lower():
                     f,iteracoes = execute_cgne(H, g)
                 elif "CGNR".lower() == algorithm.lower():
@@ -189,34 +206,34 @@ def reconstruct():
                 mem = psutil.virtual_memory()
                 cpu = psutil.cpu_percent(interval=1)
 
-                f_min, f_max = f.min(), f.max()
-                if f_max != f_min:
-                    f_norm = (f - f_min) / (f_max - f_min) * 255
+                f_clipped = np.clip(f, 0, None)
+                
+                f_max = f_clipped.max()
+
+                if f_max > 1e-12: 
+                   f_norm = (f_clipped / f_max) * 255
                 else:
-                    f_norm = np.full_like(f, 128)
-        
+                   f_norm = np.full_like(f, 0)
+
                 lado = int(np.sqrt(len(f)))
                 imagem_array = f_norm[:lado*lado].reshape((lado, lado), order='F')
 
                 imagem_array = np.clip(imagem_array, 0, 255)
                 imagem = Image.fromarray(imagem_array.astype('uint8'))
 
-                # Converte imagem para bytes
                 img_bytes = io.BytesIO()
                 imagem.save(img_bytes, format='PNG')
                 img_bytes.seek(0)
 
-                # REQUISITO ATENDIDO: Data e hora do término da reconstrução
                 end_time = time.time()
                 end_dt = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-                # REQUISITO ATENDIDO: Resposta com todos os metadados obrigatórios
                 response = make_response(send_file(img_bytes, mimetype='image/png', download_name='reconstruida.png'))
-                response.headers['X-Algoritmo'] = "cgnr"  # 2. Identificação do algoritmo
-                response.headers['X-Inicio'] = start_dt  # 3. Data/hora início
-                response.headers['X-Fim'] = end_dt  # 4. Data/hora término  
-                response.headers['X-Tamanho'] = f"{lado}x{lado}"  # 5. Tamanho em pixels
-                response.headers['X-Iteracoes'] = str(iteracoes)  # 6. Número de iterações
+                response.headers['X-Algoritmo'] = algorithm 
+                response.headers['X-Inicio'] = start_dt
+                response.headers['X-Fim'] = end_dt
+                response.headers['X-Tamanho'] = f"{lado}x{lado}"
+                response.headers['X-Iteracoes'] = str(iteracoes)
                 response.headers['X-Tempo'] = str(end_time - start_time) 
                 response.headers['X-Cpu'] = str(cpu)
                 response.headers['X-Mem'] = str(mem.percent)
@@ -229,6 +246,7 @@ def reconstruct():
 def ping():
     return 'OK', 200
 
+pre_load_data()
 if __name__ == '__main__':
-    print("Iniciando servidor")
+    print("Iniciando servidor Flask (desenvolvimento)")
     app.run(host='0.0.0.0', port=5000, threaded=True)

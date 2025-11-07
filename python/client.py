@@ -120,7 +120,7 @@ def funcao_thread_cliente():
         t.join()
 
 def simula_clientes():
-    quantidade_clientes = random.randint(2,5)
+    quantidade_clientes = 1
     threads_cliente = []
     for i in range(quantidade_clientes):
         thread_cliente = threading.Thread(target=funcao_thread_cliente)
