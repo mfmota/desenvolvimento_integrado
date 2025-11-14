@@ -7,7 +7,7 @@ import datetime
 
 # URLs de reconstrução
 URL_PYTHON_SERVER = "http://localhost:5000/interpretedServer/reconstruct"
-URL_JAVA_SERVER = "http://localhost:8080/interpretedServer/reconstruct" 
+URL_JAVA_SERVER = "http://localhost:8080/compiledServer/reconstruct" 
 
 # Um Lock global para proteger a escrita nos arquivos de log
 file_lock = threading.Lock()
@@ -81,12 +81,12 @@ def send_signal():
     Função 'master' que prepara a carga e dispara as threads 
     para enviar simultaneamente aos servidores Python e Java.
     """
-    model = 'H_30x30.csv'# random.choice(MODELS)
+    model =  'H_30x30.csv'#random.choice(MODELS)#
 
     if model == 'H_60x60.csv':
         signal = random.choice(SIGNAL60)
     else:
-        signal = 'sinal_1_30x30.csv'#random.choice(SIGNAL30)
+        signal = 'sinal_1_30x30.csv'#random.choice(SIGNAL30) #
 
     algorithm = random.choice(ALGORITHM)
 
@@ -171,7 +171,7 @@ def funcao_thread_cliente():
         t.join()
 
 def simula_clientes():
-    quantidade_clientes = 1 #random.randint(2,3)
+    quantidade_clientes = 2 #random.randint(2,3)
     threads_cliente = []
     for i in range(quantidade_clientes):
         thread_cliente = threading.Thread(target=funcao_thread_cliente)

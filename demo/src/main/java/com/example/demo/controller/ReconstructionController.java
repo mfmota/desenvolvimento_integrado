@@ -17,7 +17,7 @@ import java.time.format.DateTimeFormatter;
 public class ReconstructionController {
 
     private final ReconstructionService reconstructionService;
-    // Formatador para os headers, igual ao do Python
+    
     private final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
 
@@ -28,15 +28,13 @@ public class ReconstructionController {
     public ResponseEntity<String> ping() {
         return ResponseEntity.ok("OK");
     }
-    // 1. Endpoint e tipo de "consumo" (JSON) alterados
-    @PostMapping(value = "/interpretedServer/reconstruct", consumes = MediaType.APPLICATION_JSON_VALUE)
+    
+    @PostMapping(value = "/compiledServer/reconstruct", consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<byte[]> reconstruct(
-            @RequestBody ReconstructionRequest request) { // 2. Recebe o DTO JSON
+            @RequestBody ReconstructionRequest request) { 
 
-        // 3. Chama o serviço (que foi refatorado)
         ImageResult result = reconstructionService.reconstruct(request);
 
-        // 4. Monta os Headers HTTP, idênticos ao Python
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.IMAGE_PNG);
         headers.add("X-Algoritmo", result.algoritmo());
@@ -48,7 +46,6 @@ public class ReconstructionController {
         headers.add("X-Cpu", String.format("%.1f", result.cpuPercent()));
         headers.add("X-Mem", String.format("%.1f", result.memPercent()));
 
-        // 5. Retorna a imagem (byte[]) com os headers
         return ResponseEntity.ok()
                 .headers(headers)
                 .body(result.pngData());

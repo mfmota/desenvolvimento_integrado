@@ -20,13 +20,17 @@ import oshi.hardware.GlobalMemory;
 
 import java.io.IOException;
 import java.time.ZonedDateTime;
+import java.util.concurrent.locks.ReentrantLock; 
 
 @Service
 public class ReconstructionService {
 
-    private final DataCacheService dataCacheService; // <- Modificado
-    private final SystemInfo systemInfo; // <- Novo
-    private final CentralProcessor processor; // <- Novo
+    private final DataCacheService dataCacheService;
+    private final SystemInfo systemInfo;
+    private final CentralProcessor processor;
+
+    private final ReentrantLock cpuLock = new ReentrantLock();
+    private long[] prevTicks;
 
     private static final Logger logger = LoggerFactory.getLogger(ReconstructionService.class);
     private static final int MAX_ITERATIONS = 10;
@@ -34,12 +38,11 @@ public class ReconstructionService {
 
     public ReconstructionService(DataCacheService dataCacheService) {
         this.dataCacheService = dataCacheService;
-        // Inicializa o OSHI para monitoramento
         this.systemInfo = new SystemInfo();
         this.processor = systemInfo.getHardware().getProcessor();
+        this.prevTicks = processor.getSystemCpuLoadTicks();
     }
 
-    // DTO interno para retornar resultado do algoritmo
     private record AlgorithmResult(INDArray f, int iterations) {
     }
 
@@ -48,34 +51,44 @@ public class ReconstructionService {
         ZonedDateTime startTime = ZonedDateTime.now();
         long startNanos = System.nanoTime();
 
-        // 1. Obter dados do cache (SUPER RÁPIDO)
-        INDArray H = dataCacheService.getData(request.modelo());
-        INDArray g = dataCacheService.getData(request.sinal());
+        Object modelDataObj = dataCacheService.getData(request.modelo());
+        if (!(modelDataObj instanceof DataCacheService.PrecalculatedModel modelData)) {
+            throw new IllegalArgumentException("Cache do modelo não é do tipo PrecalculatedModel.");
+        }
+        INDArray H_norm = modelData.H_norm();
+        INDArray H_norm_T = modelData.H_norm_T(); 
+        double H_std = modelData.H_std();
 
-        // 2. Executar algoritmo
+        Object signalDataObj = dataCacheService.getData(request.sinal());
+        if (!(signalDataObj instanceof INDArray g)) {
+            throw new IllegalArgumentException("Cache do sinal não é do tipo INDArray.");
+        }
+        double[] gStats = new double[2];
+        INDArray g_norm = normalize(g, gStats);
+        double g_std = gStats[1];
+        double lambda_reg = Transforms.abs(H_norm_T.mmul(g_norm)).maxNumber().doubleValue() * 0.10;
+        logger.info("[CÁLCULO] Coeficiente λ: {}", String.format("%.4e", lambda_reg));
+
         AlgorithmResult algResult;
         if ("CGNE".equalsIgnoreCase(request.algoritmo())) {
-            algResult = executeCgne(H, g);
+            algResult = executeCgne(H_norm, H_norm_T, g_norm); 
         } else if ("CGNR".equalsIgnoreCase(request.algoritmo())) {
-            algResult = executeCgnr(H, g);
+            algResult = executeCgnr(H_norm, H_norm_T, g_norm); 
         } else {
             throw new IllegalArgumentException("Algoritmo desconhecido: " + request.algoritmo());
         }
 
-        INDArray f_final = algResult.f();
+        INDArray f = algResult.f();
         int iterations = algResult.iterations();
 
-        // 3. Obter status de CPU/Memória (como psutil)
-        // (Nota: Medir CPU é complexo, isso é uma aproximação)
-        double cpuPercent = getCpuUsage();
+        double cpuPercent = getCpuUsage(); 
         GlobalMemory memory = systemInfo.getHardware().getMemory();
         double memPercent = (memory.getTotal() - memory.getAvailable()) * 100.0 / memory.getTotal();
 
-        // 4. Normalização de Imagem ("Meio-Termo" com Sqrt)
-        // Correto
-        INDArray f_clipped = Transforms.relu(f_final); // Zera negativos (Rectified Linear Unit)
-        double f_max = f_clipped.maxNumber().doubleValue();
+        INDArray f_final = (H_std > 1e-12) ? f.mul(g_std / H_std) : f;
 
+        INDArray f_clipped = Transforms.relu(f_final);
+        double f_max = f_clipped.maxNumber().doubleValue();
         INDArray f_norm;
         if (f_max > 1e-12) {
             f_norm = f_clipped.div(f_max).mul(255);
@@ -83,9 +96,7 @@ public class ReconstructionService {
             f_norm = Nd4j.zeros(f_final.shape());
         }
 
-        // 5. Reshape e Criação da Imagem PNG (com order 'F')
         int lado = (int) Math.sqrt(f_norm.length());
-
         byte[] pngData = createPng(f_norm, lado, lado);
         String tamanho = lado + "x" + lado;
 
@@ -105,17 +116,11 @@ public class ReconstructionService {
                 memPercent);
     }
 
-    // --- Funções de Algoritmo (REESCRITAS PARA BATER COM PYTHON) ---
-
-    // Normaliza um array (z-score)
     private INDArray normalize(INDArray A, double[] outStats) {
         double mean = A.meanNumber().doubleValue();
         double std = A.stdNumber().doubleValue();
-
-        // Salva stats para de-normalização
         outStats[0] = mean;
         outStats[1] = std;
-
         if (std > 1e-12) {
             return A.sub(mean).div(std);
         }
@@ -123,25 +128,17 @@ public class ReconstructionService {
         return A.sub(mean);
     }
 
-    private AlgorithmResult executeCgne(INDArray H, INDArray g) {
-        double[] hStats = new double[2];
-        double[] gStats = new double[2];
-
-        INDArray H_norm = normalize(H, hStats);
-        INDArray g_norm = normalize(g, gStats);
-        double H_std = hStats[1];
-        double g_std = gStats[1];
-
+    private AlgorithmResult executeCgne(INDArray H_norm, INDArray H_norm_T, INDArray g_norm) {
+        
         long n = H_norm.columns();
         INDArray f = Nd4j.zeros(DataType.DOUBLE, n, 1);
-        INDArray r = g_norm.dup(); // r = g_norm.copy()
-        INDArray p = H_norm.transpose().mmul(r);
+        INDArray r = g_norm.dup(); 
+        INDArray p = H_norm_T.mmul(r); 
         double r_norm_sq_old = r.norm2Number().doubleValue() * r.norm2Number().doubleValue();
 
         int i = 0;
         for (i = 0; i < MAX_ITERATIONS; i++) {
             double p_norm_sq = p.norm2Number().doubleValue() * p.norm2Number().doubleValue();
-
             if (p_norm_sq < 1e-20)
                 break;
 
@@ -159,11 +156,13 @@ public class ReconstructionService {
             }
 
             double r_norm_sq_new = r_next.norm2Number().doubleValue() * r_next.norm2Number().doubleValue();
-            if (r_norm_sq_old < 1e-20)
-                break;
+            if (r_norm_sq_old < 1e-20) {
+                 f = f_next; 
+                 break;
+            }
 
             double beta = r_norm_sq_new / r_norm_sq_old;
-            INDArray p_next = H_norm.transpose().mmul(r_next).add(p.mul(beta));
+            INDArray p_next = H_norm_T.mmul(r_next).add(p.mul(beta)); 
 
             f = f_next;
             r = r_next;
@@ -171,27 +170,17 @@ public class ReconstructionService {
             r_norm_sq_old = r_norm_sq_new;
         }
 
-        // De-normalização (como no Python)
-        INDArray f_final = (H_std > 1e-12) ? f.mul(g_std / H_std) : f;
-
         logger.info("CGNE concluído em {} iterações", i + 1);
-        return new AlgorithmResult(f_final, i + 1);
+        return new AlgorithmResult(f, i + 1);
     }
 
-    private AlgorithmResult executeCgnr(INDArray H, INDArray g) {
-        double[] hStats = new double[2];
-        double[] gStats = new double[2];
-
-        INDArray H_norm = normalize(H, hStats);
-        INDArray g_norm = normalize(g, gStats);
-        double H_std = hStats[1];
-        double g_std = gStats[1];
+    private AlgorithmResult executeCgnr(INDArray H_norm, INDArray H_norm_T, INDArray g_norm) {
 
         long n = H_norm.columns();
         INDArray f = Nd4j.zeros(DataType.DOUBLE, n, 1);
         INDArray r = g_norm.sub(H_norm.mmul(f));
-        INDArray z = H_norm.transpose().mmul(r);
-        INDArray p = z.dup();
+        INDArray z = H_norm_T.mmul(r); 
+        INDArray p = z.dup(); 
 
         double r_norm_old = r.norm2Number().doubleValue();
         double z_norm_sq_old = z.norm2Number().doubleValue() * z.norm2Number().doubleValue();
@@ -216,12 +205,14 @@ public class ReconstructionService {
                 break;
             }
 
-            INDArray z_next = H_norm.transpose().mmul(r_next);
+            INDArray z_next = H_norm_T.mmul(r_next); 
             double z_norm_sq_new = z_next.norm2Number().doubleValue() * z_next.norm2Number().doubleValue();
 
-            if (z_norm_sq_old < 1e-20)
-                break;
-
+            if (z_norm_sq_old < 1e-20) {
+                 f = f_next;
+                 break;
+            }
+                
             double beta = z_norm_sq_new / z_norm_sq_old;
             INDArray p_next = z_next.add(p.mul(beta));
 
@@ -233,34 +224,20 @@ public class ReconstructionService {
             z_norm_sq_old = z_norm_sq_new;
         }
 
-        // De-normalização (como no Python)
-        INDArray f_final = (H_std > 1e-12) ? f.mul(g_std / H_std) : f;
-
         logger.info("CGNR concluído em {} iterações", i + 1);
-        return new AlgorithmResult(f_final, i + 1);
+        return new AlgorithmResult(f, i + 1);
     }
-
-    // --- Funções Utilitárias ---
 
     private byte[] createPng(INDArray f_norm_vector, int width, int height) {
         BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY);
         long length = f_norm_vector.length();
         for (int k = 0; k < length; k++) {
-            // Mapeamento de índice 1D (ordem 'F') para 2D (x, y)
-            // O k-ésimo item preenche as colunas primeiro.
-            int x = k / height; // Índice da Coluna
-            int y = k % height; // Índice da Linha
-
-            // Pega o valor do vetor 1D
+            int x = k / height; // Coluna
+            int y = k % height; // Linha
             int gray = (int) Math.round(f_norm_vector.getDouble(k));
-
-            // Garante o clip (redundante se f_norm já foi clipado, mas seguro)
             gray = Math.max(0, Math.min(255, gray));
-
-            // Define o pixel na coordenada (x, y) correta
             image.getRaster().setSample(x, y, 0, gray);
         }
-
         try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
             ImageIO.write(image, "PNG", baos);
             return baos.toByteArray();
@@ -269,15 +246,14 @@ public class ReconstructionService {
         }
     }
 
-    // Método para simular o psutil.cpu_percent(interval=1)
-    // É uma aproximação que bloqueia por 500ms
     private double getCpuUsage() {
-        long[] prevTicks = processor.getSystemCpuLoadTicks();
+        cpuLock.lock();
         try {
-            Thread.sleep(500); // Intervalo de medição
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            double load = processor.getSystemCpuLoadBetweenTicks(this.prevTicks) * 100;
+            this.prevTicks = processor.getSystemCpuLoadTicks();
+            return load;
+        } finally {
+            cpuLock.unlock();
         }
-        return processor.getSystemCpuLoadBetweenTicks(prevTicks) * 100;
     }
 }
