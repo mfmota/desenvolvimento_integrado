@@ -5,11 +5,9 @@ import threading
 import os 
 import datetime
 
-# URLs de reconstrução
 URL_PYTHON_SERVER = "http://localhost:5000/interpretedServer/reconstruct"
 URL_JAVA_SERVER = "http://localhost:8080/compiledServer/reconstruct" 
 
-# Um Lock global para proteger a escrita nos arquivos de log
 file_lock = threading.Lock()
 
 MODELS = ['H_60x60.csv','H_30x30.csv']
@@ -22,10 +20,6 @@ SIGNAL30 = ['sinal_1_30x30.csv',
 ALGORITHM = ['CGNE','CGNR']
 
 def make_request(target_url, server_tag, payload, model, signal, algorithm):
-    """
-    Função 'worker' que executa a requisição e processa a resposta.
-    Esta função é chamada em uma thread separada para cada servidor.
-    """
     try:
         print(f"[REQUISIÇÃO] Enviando para {server_tag.upper()}...")
         start_req_time = time.time()
@@ -43,7 +37,6 @@ def make_request(target_url, server_tag, payload, model, signal, algorithm):
             with open(image_path, 'wb') as f:
                 f.write(resp.content)
             
-            # Extrai os headers da resposta do servidor
             iteractions = resp.headers.get('X-Iteracoes', '0')
             exec_time = resp.headers.get('X-Tempo', '0') 
             alg = resp.headers.get('X-Algoritmo', 'unknown')
@@ -53,7 +46,6 @@ def make_request(target_url, server_tag, payload, model, signal, algorithm):
             uso_cpu = resp.headers.get('X-Cpu','')
             uso_mem = resp.headers.get('X-Mem','')
 
-            # --- Escrita segura em arquivo ---
             with file_lock:
                 with open('relatorio_imagens.txt', 'a') as f:
                     f.write(
@@ -77,10 +69,6 @@ def make_request(target_url, server_tag, payload, model, signal, algorithm):
         print(f"[ERRO] {server_tag.upper()} - Falha na comunicação: {e}")
 
 def send_signal():
-    """
-    Função 'master' que prepara a carga e dispara as threads 
-    para enviar simultaneamente aos servidores Python e Java.
-    """
     model =  'H_30x30.csv'#random.choice(MODELS)#
 
     if model == 'H_60x60.csv':
@@ -98,29 +86,18 @@ def send_signal():
         'sinal': signal
     }
 
-    # Cria uma thread para cada servidor, passando os mesmos argumentos
     thread_python = threading.Thread(target=make_request, 
                                      args=(URL_PYTHON_SERVER, "python", payload, model, signal, algorithm))
     
     thread_java = threading.Thread(target=make_request, 
                                    args=(URL_JAVA_SERVER, "java", payload, model, signal, algorithm))
 
-    # Inicia ambas as threads (quase) ao mesmo tempo
     thread_python.start()
     thread_java.start()
 
-    # Aguarda que ambas as requisições terminem antes de continuar
     thread_python.join()
     thread_java.join()
     print(f"[ENVIO CONCLUÍDO] {model} / {signal}")
-
-
-# ===================================================================
-# NENHUMA ALTERAÇÃO NECESSÁRIA ABAIXO
-# As funções de simulação (executar_cliente, funcao_thread_cliente, 
-# simula_clientes) funcionam como estão. Elas chamam `send_signal`,
-# que agora faz o trabalho duplicado.
-# ===================================================================
 
 def executar_cliente(num_sinais=5):
     print("=== CLIENTE DE RECONSTRUÇÃO DE IMAGENS DE ULTRASSOM ===")

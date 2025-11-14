@@ -12,18 +12,16 @@ app = Flask(__name__)
 semaforo_clientes = threading.Semaphore(2)
 semaforo_processos = threading.Semaphore(5)
 
-DATA_CACHE = {} # Cache agora vai guardar dicionários
+DATA_CACHE = {} 
 MODEL_FILES = ['H_60x60.csv','H_30x30.csv']
 SIGNAL_FILES = [
     'sinal_1_60x60.csv', 'sinal_2_60x60.csv', 'sinal_3_60x60.csv',
     'sinal_1_30x30.csv', 'sinal_2_30x30.csv', 'sinal_3_30x30.csv'
 ]
 
-### ALTERADO ###
 def pre_load_data():
     print("=== INICIANDO PRÉ-CARREGAMENTO DE DADOS E CÁLCULOS ===")
     
-    # 1. Carrega Sinais (eles não mudam)
     for f in SIGNAL_FILES:
         try:
             DATA_CACHE[f] = np.loadtxt(f, delimiter=',', dtype=np.float64)
@@ -31,7 +29,6 @@ def pre_load_data():
         except Exception as e:
             print(f"[ERRO CACHE] Falha ao carregar {f}. Erro: {e}")
 
-    # 2. Carrega Modelos e pré-calcula tudo
     for f in MODEL_FILES:
         try:
             print(f" - [CACHE MODELO] Processando {f}...")
@@ -45,16 +42,15 @@ def pre_load_data():
             else:
                 H_norm = H - H_mean
             
-            H_norm_T = H_norm.T # Pré-calcula transposta
+            H_norm_T = H_norm.T 
             
-            # Pré-calcula 'c' (O CÁLCULO LENTO)
+            # Pré-calcula 'c' 
             print(f"   -> Calculando 'c' para {f} (pode demorar)...")
             start_c = time.time()
             c_factor = np.linalg.norm(H_norm_T @ H_norm, ord=2)
             end_c = time.time()
             print(f"   -> 'c' calculado ({c_factor:.4e}) em {end_c - start_c:.2f}s")
             
-            # Guarda tudo no cache
             DATA_CACHE[f] = {
                 'H_norm': H_norm,
                 'H_norm_T': H_norm_T,
@@ -74,18 +70,15 @@ def pre_load_data():
 MAX_ITERATIONS = 10
 ERROR_TOLERANCE = 1e-4
 
-### ALTERADO ###
-# Funções agora recebem H_norm e H_norm_T (transposta)
-# para evitar recalcular a transposta no loop
 def execute_cgne(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
     
     m, n = H_norm.shape
     print(f"Resolvendo sistema {m}x{n} (CGNE) com {MAX_ITERATIONS} iterações máximas")
 
     f = np.zeros(n)
-    r = g_norm.copy() # .copy() é necessário aqui pois 'r' é modificado
+    r = g_norm.copy() 
     
-    p = H_norm_T @ r # Usa H_norm_T pré-calculada
+    p = H_norm_T @ r 
     r_norm_sq_old = np.dot(r, r)
 
     i = 0 
@@ -112,7 +105,7 @@ def execute_cgne(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
             break
 
         beta = r_norm_sq_new / r_norm_sq_old
-        p_next = (H_norm_T @ r_next) + beta * p # Usa H_norm_T
+        p_next = (H_norm_T @ r_next) + beta * p 
         
         f = f_next
         r = r_next
@@ -122,7 +115,6 @@ def execute_cgne(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
     print(f"Reconstrução CGNE concluída em {i+1} iterações")
     return f, i + 1
 
-### ALTERADO ###
 def execute_cgnr(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
 
     m, n = H_norm.shape
@@ -130,8 +122,8 @@ def execute_cgnr(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
 
     f = np.zeros(n)
     r = g_norm - H_norm @ f
-    z = H_norm_T @ r # Usa H_norm_T
-    p = z.copy() # .copy() necessário
+    z = H_norm_T @ r 
+    p = z.copy() 
 
     for i in range(MAX_ITERATIONS):
         w = H_norm @ p
@@ -151,7 +143,7 @@ def execute_cgnr(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
             f = f_next
             break
             
-        z_next = H_norm_T @ r_next # Usa H_norm_T
+        z_next = H_norm_T @ r_next 
         z_next_norm_sq = np.linalg.norm(z_next, ord=2) ** 2
         
         if z_norm_sq < 1e-20:
@@ -182,9 +174,6 @@ def reconstruct():
 
         with semaforo_processos:
             try:
-                ### ALTERADO: Busca dados do cache (SEM .copy() para H e g) ###
-                
-                # Pega dados do modelo (pré-processados)
                 model_data = DATA_CACHE.get(model_name)
                 if model_data is None:
                     return jsonify({'error': f"Modelo {model_name} não encontrado no cache."}), 404
@@ -192,21 +181,12 @@ def reconstruct():
                 H_norm = model_data['H_norm']
                 H_norm_T = model_data['H_norm_T']
                 H_std = model_data['H_std']
-                c_factor = model_data['c_factor'] # Pega 'c' pré-calculado
+                c_factor = model_data['c_factor']
 
-                # Pega dados do sinal (bruto)
                 g = DATA_CACHE.get(sinal_name)
                 if g is None:
                     return jsonify({'error': f"Sinal {sinal_name} não encontrado no cache."}), 404
         
-                # ===============================================
-                ### ALTERADO: LÓGICA DE CÁLCULO MUITO MAIS SIMPLES ###
-                # ===============================================
-
-                # --- 1. Cálculo de Ganho (Apenas log, não aplicado) ---
-                # (Lógica de S/N removida para simplificar, já que não é usada)
-                
-                # --- 2. Normalização de 'g' (A única feita por requisição) ---
                 g_mean = np.mean(g)
                 g_std = np.std(g)
                 if g_std > 1e-12:
@@ -218,15 +198,9 @@ def reconstruct():
                 print(f"[CÁLCULO] Fator de redução c (pré-calculado): {c_factor:.4e}")
 
                 # --- 4. Coeficiente de Regularização (λ) ---
-                # Este ainda precisa ser calculado por requisição, pois depende de 'g'
                 lambda_reg = np.max(np.abs(H_norm_T @ g_norm)) * 0.10
                 print(f"[CÁLCULO] Coeficiente λ: {lambda_reg:.4e}")
                 
-                # ===============================================
-                ### FIM DAS ALTERAÇÕES ###
-                # ===============================================
-
-                # 5. Executa o algoritmo
                 if "CGNE".lower() == algorithm.lower():
                     f,iteracoes = execute_cgne(H_norm, H_norm_T, g_norm)
                 elif "CGNR".lower() == algorithm.lower():
@@ -234,9 +208,8 @@ def reconstruct():
                 else:
                     return jsonify({'error': f"Algoritmo {algorithm} desconhecido"}), 400
 
-                ### ALTERADO: psutil não-bloqueante ###
                 mem = psutil.virtual_memory()
-                cpu = psutil.cpu_percent(interval=None) # NÃO BLOQUEIA MAIS
+                cpu = psutil.cpu_percent(interval=None) 
 
                 # 6. De-normalização
                 if H_std > 1e-12:
