@@ -1,15 +1,15 @@
 package com.example.demo.dto;
 
-import java.time.ZonedDateTime;
+import java.time.LocalDateTime;
 
 public record ImageResult(
-    byte[] pngData,
-    String algoritmo,
-    ZonedDateTime startTime,
-    ZonedDateTime endTime,
-    long tempoMs,
-    String tamanho,
-    int iteracoes,
-    double cpuPercent,
-    double memPercent
+        byte[] pngData,
+        String algoritmo,
+        String tamanho,
+        int iteracoes,
+        double tempoSegundos,
+        double cpuPercent,
+        double memPercent,
+        LocalDateTime startTime,
+        LocalDateTime endTime
 ) {}

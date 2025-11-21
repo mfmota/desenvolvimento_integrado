@@ -1,7 +1,6 @@
 package com.example.demo.service;
 
 import com.example.demo.dto.ImageResult;
-import com.example.demo.dto.ReconstructionRequest;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.api.buffer.DataType;
 import org.nd4j.linalg.factory.Nd4j;
@@ -19,8 +18,11 @@ import oshi.hardware.CentralProcessor;
 import oshi.hardware.GlobalMemory;
 
 import java.io.IOException;
-import java.time.ZonedDateTime;
-import java.util.concurrent.locks.ReentrantLock; 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
+import java.time.LocalDateTime;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Service
 public class ReconstructionService {
@@ -46,173 +48,204 @@ public class ReconstructionService {
     private record AlgorithmResult(INDArray f, int iterations) {
     }
 
-    public ImageResult reconstruct(ReconstructionRequest request) {
-        logger.info("Iniciando reconstrução: {}", request);
-        ZonedDateTime startTime = ZonedDateTime.now();
+    /**
+     * Novo método público usado pelo controller.
+     *
+     * @param rawSignal bytes contendo float32 little-endian (np.float32.tobytes())
+     * @param modelName nome do modelo pré-carregado (ex: H_30x30.csv)
+     * @param algorithm "CGNE" ou "CGNR"
+     * @param tamanho   (opcional) número de amostras esperadas
+     * @param ganho     (opcional) string com ganho para logging
+     * @return ImageResult com PNG e metadados
+     */
+    public ImageResult reconstruct(byte[] rawSignal, String modelName, String algorithm, Integer tamanho, String ganho) {
+        logger.info("Iniciando reconstrução. Modelo={}, Alg={}, TamanhoHeader={}, Ganho={}",
+                modelName, algorithm, tamanho, ganho);
+        LocalDateTime startTime = LocalDateTime.now();
         long startNanos = System.nanoTime();
 
-        Object modelDataObj = dataCacheService.getData(request.modelo());
+        // 1) recuperar modelo do cache
+        Object modelDataObj = dataCacheService.getData(modelName);
         if (!(modelDataObj instanceof DataCacheService.PrecalculatedModel modelData)) {
-            throw new IllegalArgumentException("Cache do modelo não é do tipo PrecalculatedModel.");
+            throw new IllegalArgumentException("Modelo " + modelName + " não encontrado no cache ou tipo inválido.");
         }
         INDArray H_norm = modelData.H_norm();
-        INDArray H_norm_T = modelData.H_norm_T(); 
+        INDArray H_norm_T = modelData.H_norm_T();
         double H_std = modelData.H_std();
+        double c_factor = modelData.c_factor();
 
-        Object signalDataObj = dataCacheService.getData(request.sinal());
-        if (!(signalDataObj instanceof INDArray g)) {
-            throw new IllegalArgumentException("Cache do sinal não é do tipo INDArray.");
+        // 2) converter rawSignal (bytes) -> float[] (little-endian)
+        float[] floatArr = bytesToFloatArrayLE(rawSignal);
+        if (tamanho != null && tamanho.intValue() != floatArr.length) {
+            throw new IllegalArgumentException("Tamanho incorreto do sinal: esperado " + tamanho + ", recebido " + floatArr.length);
         }
-        double[] gStats = new double[2];
-        INDArray g_norm = normalize(g, gStats);
-        double g_std = gStats[1];
+
+        // 3) criar INDArray g (coluna) e cast para DOUBLE para os cálculos
+        INDArray gFloat = Nd4j.createFromArray(floatArr); // 1D float
+        INDArray g = gFloat.castTo(DataType.DOUBLE).reshape(gFloat.length(), 1); // (n,1) double
+
+        // 4) normalização do sinal (igual ao Python)
+        double g_mean = g.meanNumber().doubleValue();
+        double g_std = g.stdNumber().doubleValue();
+        INDArray g_norm;
+        if (g_std > 1e-12) {
+            g_norm = g.sub(g_mean).div(g_std);
+        } else {
+            logger.warn("Desvio padrão muito pequeno no sinal; usando normalização parcial.");
+            g_norm = g.sub(g_mean);
+        }
+
+        // 5) cálculo do lambda_reg (para log)
         double lambda_reg = Transforms.abs(H_norm_T.mmul(g_norm)).maxNumber().doubleValue() * 0.10;
         logger.info("[CÁLCULO] Coeficiente λ: {}", String.format("%.4e", lambda_reg));
+        logger.info("[CÁLCULO] Fator c (pré-calculado): {}", String.format("%.4e", c_factor));
 
+        // 6) executar algoritmo escolhido
         AlgorithmResult algResult;
-        if ("CGNE".equalsIgnoreCase(request.algoritmo())) {
-            algResult = executeCgne(H_norm, H_norm_T, g_norm); 
-        } else if ("CGNR".equalsIgnoreCase(request.algoritmo())) {
-            algResult = executeCgnr(H_norm, H_norm_T, g_norm); 
+        String algLower = algorithm.trim().toLowerCase();
+        if ("cgne".equals(algLower)) {
+            algResult = executeCgne(H_norm, H_norm_T, g_norm);
+        } else if ("cgnr".equals(algLower)) {
+            algResult = executeCgnr(H_norm, H_norm_T, g_norm);
         } else {
-            throw new IllegalArgumentException("Algoritmo desconhecido: " + request.algoritmo());
+            throw new IllegalArgumentException("Algoritmo desconhecido: " + algorithm);
         }
 
         INDArray f = algResult.f();
         int iterations = algResult.iterations();
 
-        double cpuPercent = getCpuUsage(); 
+        // 7) coletar recursos
+        double cpuPercent = getCpuUsage();
         GlobalMemory memory = systemInfo.getHardware().getMemory();
         double memPercent = (memory.getTotal() - memory.getAvailable()) * 100.0 / memory.getTotal();
 
-        INDArray f_final = (H_std > 1e-12) ? f.mul(g_std / H_std) : f;
+        // 8) de-normalização (mesma lógica)
+        INDArray f_final;
+        if (H_std > 1e-12) {
+            f_final = f.mul(g_std / H_std);
+        } else {
+            f_final = f;
+        }
 
+        // 9) clipping e normalização final para 0-255
         INDArray f_clipped = Transforms.relu(f_final);
         double f_max = f_clipped.maxNumber().doubleValue();
         INDArray f_norm;
         if (f_max > 1e-12) {
-            f_norm = f_clipped.div(f_max).mul(255);
+            f_norm = f_clipped.div(f_max).mul(255.0);
         } else {
-            f_norm = Nd4j.zeros(f_final.shape());
+            f_norm = Nd4j.zeros(f_clipped.shape());
         }
 
-        int lado = (int) Math.sqrt(f_norm.length());
-        byte[] pngData = createPng(f_norm, lado, lado);
-        String tamanho = lado + "x" + lado;
+        // 10) montar imagem (coluna-major -> order='F' equivalente)
+        long n_pixels = f_norm.length();
+        int lado = (int) Math.floor(Math.sqrt(n_pixels));
+        if (lado * lado <= 0) {
+            throw new RuntimeException("Tamanho do vetor de reconstrução inválido: " + n_pixels);
+        }
 
+        // extrair valores em double para popular a imagem
+        double[] pixels = f_norm.data().asDouble(); // pode ser grande, mas necessário para criação de PNG
+        // montar array 2D coluna-major (compatible with Python's order='F')
+        byte[] pngData = createPngFromColumnMajorDouble(pixels, lado, lado);
+
+        LocalDateTime endTime = LocalDateTime.now();
         long endNanos = System.nanoTime();
-        ZonedDateTime endTime = ZonedDateTime.now();
-        long durationMs = (endNanos - startNanos) / 1_000_000;
+        double durationSeconds = (endNanos - startNanos) / 1_000_000_000.0;
 
-        return new ImageResult(
+        // 11) retornar ImageResult (assuma que ImageResult tem este construtor/record)
+        ImageResult result = new ImageResult(
                 pngData,
-                request.algoritmo(),
-                startTime,
-                endTime,
-                durationMs,
-                tamanho,
+                algorithm,
+                lado + "x" + lado,
                 iterations,
+                durationSeconds,
                 cpuPercent,
-                memPercent);
+                memPercent,
+                startTime,
+                endTime
+        );
+
+        return result;
     }
 
-    private INDArray normalize(INDArray A, double[] outStats) {
-        double mean = A.meanNumber().doubleValue();
-        double std = A.stdNumber().doubleValue();
-        outStats[0] = mean;
-        outStats[1] = std;
-        if (std > 1e-12) {
-            return A.sub(mean).div(std);
-        }
-        logger.warn("Desvio padrão muito pequeno, aplicando normalização parcial.");
-        return A.sub(mean);
-    }
+    // ---------------------------
+    // Métodos auxiliares
+    // ---------------------------
 
     private AlgorithmResult executeCgne(INDArray H_norm, INDArray H_norm_T, INDArray g_norm) {
-        
-        long n = H_norm.columns();
+        // shapes: H_norm is (m,n); g_norm is (m,1); want f of size (n,1)
+        int n = (int) H_norm.columns();
         INDArray f = Nd4j.zeros(DataType.DOUBLE, n, 1);
-        INDArray r = g_norm.dup(); 
-        INDArray p = H_norm_T.mmul(r); 
-        double r_norm_sq_old = r.norm2Number().doubleValue() * r.norm2Number().doubleValue();
+        INDArray r = g_norm.dup();
+        INDArray p = H_norm_T.mmul(r);
+        double r_norm_old = r.norm2Number().doubleValue();
 
-        int i = 0;
-        for (i = 0; i < MAX_ITERATIONS; i++) {
-            double p_norm_sq = p.norm2Number().doubleValue() * p.norm2Number().doubleValue();
-            if (p_norm_sq < 1e-20)
-                break;
+        for (int i = 0; i < MAX_ITERATIONS; i++) {
+            double p_norm_sq = Math.pow(p.norm2Number().doubleValue(), 2.0);
+            if (p_norm_sq < 1e-20) break;
 
-            double alpha = r_norm_sq_old / p_norm_sq;
+            double alpha = (r_norm_old * r_norm_old) / p_norm_sq;
             INDArray f_next = f.add(p.mul(alpha));
             INDArray q = H_norm.mmul(p);
             INDArray r_next = r.sub(q.mul(alpha));
 
-            double error_absolute = r_next.norm2Number().doubleValue();
-            double error_relative = Math.abs(error_absolute - r.norm2Number().doubleValue());
+            double r_norm_new = r_next.norm2Number().doubleValue();
+            double epsilon = Math.abs(r_norm_new - r_norm_old);
 
-            if (error_absolute < ERROR_TOLERANCE || error_relative < ERROR_TOLERANCE) {
-                f = f_next;
-                break;
+            if (epsilon < ERROR_TOLERANCE || r_norm_new < ERROR_TOLERANCE) {
+                return new AlgorithmResult(f_next, i + 1);
             }
 
-            double r_norm_sq_new = r_next.norm2Number().doubleValue() * r_next.norm2Number().doubleValue();
-            if (r_norm_sq_old < 1e-20) {
-                 f = f_next; 
-                 break;
+            double r_norm_sq_new = r_norm_new * r_norm_new;
+            if ((r_norm_old * r_norm_old) < 1e-20) {
+                return new AlgorithmResult(f_next, i + 1);
             }
 
-            double beta = r_norm_sq_new / r_norm_sq_old;
-            INDArray p_next = H_norm_T.mmul(r_next).add(p.mul(beta)); 
+            double beta = r_norm_sq_new / (r_norm_old * r_norm_old);
+            INDArray p_next = H_norm_T.mmul(r_next).add(p.mul(beta));
 
             f = f_next;
             r = r_next;
             p = p_next;
-            r_norm_sq_old = r_norm_sq_new;
+            r_norm_old = r_norm_new;
         }
 
-        logger.info("CGNE concluído em {} iterações", i + 1);
-        return new AlgorithmResult(f, i + 1);
+        return new AlgorithmResult(f, MAX_ITERATIONS);
     }
 
     private AlgorithmResult executeCgnr(INDArray H_norm, INDArray H_norm_T, INDArray g_norm) {
-
-        long n = H_norm.columns();
+        int n = (int) H_norm.columns();
         INDArray f = Nd4j.zeros(DataType.DOUBLE, n, 1);
         INDArray r = g_norm.sub(H_norm.mmul(f));
-        INDArray z = H_norm_T.mmul(r); 
-        INDArray p = z.dup(); 
+        INDArray z = H_norm_T.mmul(r);
+        INDArray p = z.dup();
 
         double r_norm_old = r.norm2Number().doubleValue();
-        double z_norm_sq_old = z.norm2Number().doubleValue() * z.norm2Number().doubleValue();
+        double z_norm_sq_old = Math.pow(z.norm2Number().doubleValue(), 2.0);
 
-        int i = 0;
-        for (i = 0; i < MAX_ITERATIONS; i++) {
+        for (int i = 0; i < MAX_ITERATIONS; i++) {
             INDArray w = H_norm.mmul(p);
-            double w_norm_sq = w.norm2Number().doubleValue() * w.norm2Number().doubleValue();
-
-            if (w_norm_sq < 1e-20)
-                break;
+            double w_norm_sq = Math.pow(w.norm2Number().doubleValue(), 2.0);
+            if (w_norm_sq < 1e-20) break;
 
             double alpha = z_norm_sq_old / w_norm_sq;
             INDArray f_next = f.add(p.mul(alpha));
             INDArray r_next = r.sub(w.mul(alpha));
 
-            double error_absolute = r_next.norm2Number().doubleValue();
-            double error_relative = Math.abs(error_absolute - r_norm_old);
-
-            if (error_absolute < ERROR_TOLERANCE || error_relative < ERROR_TOLERANCE) {
-                f = f_next;
-                break;
+            double r_norm_new = r_next.norm2Number().doubleValue();
+            double epsilon = Math.abs(r_norm_new - r_norm_old);
+            if (epsilon < ERROR_TOLERANCE || r_norm_new < ERROR_TOLERANCE) {
+                return new AlgorithmResult(f_next, i + 1);
             }
 
-            INDArray z_next = H_norm_T.mmul(r_next); 
-            double z_norm_sq_new = z_next.norm2Number().doubleValue() * z_next.norm2Number().doubleValue();
+            INDArray z_next = H_norm_T.mmul(r_next);
+            double z_norm_sq_new = Math.pow(z_next.norm2Number().doubleValue(), 2.0);
 
             if (z_norm_sq_old < 1e-20) {
-                 f = f_next;
-                 break;
+                return new AlgorithmResult(f_next, i + 1);
             }
-                
+
             double beta = z_norm_sq_new / z_norm_sq_old;
             INDArray p_next = z_next.add(p.mul(beta));
 
@@ -220,24 +253,38 @@ public class ReconstructionService {
             r = r_next;
             z = z_next;
             p = p_next;
-            r_norm_old = error_absolute;
+            r_norm_old = r_norm_new;
             z_norm_sq_old = z_norm_sq_new;
         }
 
-        logger.info("CGNR concluído em {} iterações", i + 1);
-        return new AlgorithmResult(f, i + 1);
+        return new AlgorithmResult(f, MAX_ITERATIONS);
     }
 
-    private byte[] createPng(INDArray f_norm_vector, int width, int height) {
+    private float[] bytesToFloatArrayLE(byte[] raw) {
+        // interpreta os bytes como float32 little-endian
+        ByteBuffer bb = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN);
+        FloatBuffer fb = bb.asFloatBuffer();
+        float[] arr = new float[fb.remaining()];
+        fb.get(arr);
+        return arr;
+    }
+
+    private byte[] createPngFromColumnMajorDouble(double[] pixelsColumnMajor, int width, int height) {
+        // pixelsColumnMajor tem dimensão width*height no formato coluna-major (order='F').
+        // Precisamos popular a imagem em (x,y) tal que x coluna e y linha.
         BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY);
-        long length = f_norm_vector.length();
-        for (int k = 0; k < length; k++) {
-            int x = k / height; // Coluna
-            int y = k % height; // Linha
-            int gray = (int) Math.round(f_norm_vector.getDouble(k));
+
+        // pixelsColumnMajor[k] correspondia à posição (col, row) usando traversal coluna-major:
+        // índice k = col * height + row
+        int total = width * height;
+        for (int k = 0; k < Math.min(total, pixelsColumnMajor.length); k++) {
+            int col = k / height;   // x
+            int row = k % height;   // y
+            int gray = (int) Math.round(pixelsColumnMajor[k]);
             gray = Math.max(0, Math.min(255, gray));
-            image.getRaster().setSample(x, y, 0, gray);
+            image.getRaster().setSample(col, row, 0, gray);
         }
+
         try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
             ImageIO.write(image, "PNG", baos);
             return baos.toByteArray();
@@ -249,7 +296,7 @@ public class ReconstructionService {
     private double getCpuUsage() {
         cpuLock.lock();
         try {
-            double load = processor.getSystemCpuLoadBetweenTicks(this.prevTicks) * 100;
+            double load = processor.getSystemCpuLoadBetweenTicks(this.prevTicks) * 100.0;
             this.prevTicks = processor.getSystemCpuLoadTicks();
             return load;
         } finally {
