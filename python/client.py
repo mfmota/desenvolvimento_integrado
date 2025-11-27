@@ -16,9 +16,6 @@ SIGNAL60 = ['sinal_1_60x60.csv', 'sinal_2_60x60.csv', 'sinal_3_60x60.csv']
 SIGNAL30 = ['sinal_1_30x30.csv', 'sinal_2_30x30.csv', 'sinal_3_30x30.csv']
 ALGORITHM = ['CGNE', 'CGNR']
 
-SIGNAL_GAIN = [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
-
-
 def make_request(target_url, server_tag, sinal_bin, tamanho, model, signal, algorithm, gain):
     try:
         print(f"[REQUISIÇÃO] Enviando para {server_tag.upper()}...")
@@ -81,26 +78,30 @@ def make_request(target_url, server_tag, sinal_bin, tamanho, model, signal, algo
 
 
 def send_signal():
-    # 1. escolhe modelo e ganho
     model = random.choice(MODELS)
-    gain = random.choice(SIGNAL_GAIN)
+    gain = "Dinâmico"
 
-    # 2. carrega o sinal correspondente
     if model == 'H_60x60.csv':
         filename = random.choice(SIGNAL60)
     else:
         filename = random.choice(SIGNAL30)
 
-    signal_array = np.loadtxt(filename, delimiter=",")
+    signal_array = np.loadtxt(filename, delimiter=",").flatten()[:, np.newaxis]
 
-    # 3. aplica ganho
-    signal_gain = signal_array * float(gain)
+    S = signal_array.shape[0]
 
-    # 4. converte para binário
-    sinal_bin = signal_gain.astype(np.float32).tobytes()
-    tamanho = len(signal_gain)
+    
+    #l_indices = np.arange(1, S + 1, dtype=np.float64) 
+    #gamma_vector = 100.0 + (1.0 / 20.0) * l_indices * np.sqrt(l_indices)
+    #gamma_vector_reshaped = gamma_vector[:, np.newaxis]
+    #signal_gain = signal_array * gamma_vector_reshaped
 
-    # 5. mesmo sinal → 2 algoritmos
+    #sinal_bin = signal_gain.astype(np.float32).tobytes()
+    #tamanho = len(signal_gain)
+    
+    sinal_bin = signal_array.astype(np.float32).tobytes()
+    tamanho = len(signal_array)
+
     print(f"\n[ENVIO] Modelo: {model}, Sinal: {filename}, Ganho: {gain}")
 
     for algorithm in ALGORITHM:

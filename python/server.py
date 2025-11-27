@@ -11,7 +11,6 @@ app = Flask(__name__)
 semaforo_clientes = threading.Semaphore(2)
 semaforo_processos = threading.Semaphore(5)
 
-# Apenas os modelos são pré-carregados (os sinais chegam em binário a cada requisição)
 DATA_CACHE = {}
 MODEL_FILES = ['H_60x60.csv', 'H_30x30.csv']
 
@@ -46,7 +45,7 @@ def pre_load_models():
     print("=== PRÉ-CARREGAMENTO DE MODELOS CONCLUÍDO ===")
 
 MAX_ITERATIONS = 10
-ERROR_TOLERANCE = 1e-4  # |epsilon| < 1e-4
+ERROR_TOLERANCE = 1e-4  
 
 def execute_cgne(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
     m, n = H_norm.shape
@@ -59,7 +58,7 @@ def execute_cgne(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
         p_norm_sq = np.dot(p, p)
         if p_norm_sq < 1e-20:
             break
-        alpha = (r_norm_old * r_norm_old) / p_norm_sq  # using r_norm^2 / p^T p
+        alpha = (r_norm_old * r_norm_old) / p_norm_sq 
         f_next = f + alpha * p
         q = H_norm @ p
         r_next = r - alpha * q
@@ -67,7 +66,6 @@ def execute_cgne(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
         r_norm_new = np.linalg.norm(r_next, ord=2)
         epsilon = abs(r_norm_new - r_norm_old)
 
-        # critério de parada pelo enunciado
         if epsilon < ERROR_TOLERANCE or r_norm_new < ERROR_TOLERANCE:
             f = f_next
             return f, i + 1
@@ -134,16 +132,6 @@ def execute_cgnr(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
 
 @app.post("/interpretedServer/reconstruct")
 def reconstruct():
-    """
-    Endpoint espera:
-    - Content-Type: application/octet-stream
-    - Headers:
-        X-Modelo: nome do modelo pré-carregado (ex: H_30x30.csv)
-        X-Alg: CGNE ou CGNR
-        X-Tamanho: (opcional) número de amostras enviado
-        X-Ganho: (opcional) apenas para registro/log
-    Corpo: bytes com float32 little-endian (np.float32.tobytes())
-    """
     with semaforo_clientes:
         content_type = request.headers.get('Content-Type', '')
         if not content_type.startswith('application/octet-stream'):
@@ -177,7 +165,6 @@ def reconstruct():
                 if not raw_bytes:
                     return jsonify({'error': 'Corpo binário vazio.'}), 400
 
-                # converte os bytes para float32 (client envia float32)
                 try:
                     sinal_float32 = np.frombuffer(raw_bytes, dtype=np.float32)
                 except Exception as e:
@@ -191,10 +178,8 @@ def reconstruct():
                     except ValueError:
                         pass
 
-                # para cálculos, convertemos para float64
                 g = sinal_float32.astype(np.float64)
 
-                # normalização do sinal (mesma lógica anterior)
                 g_mean = np.mean(g)
                 g_std = np.std(g)
                 if g_std > 1e-12:
@@ -202,14 +187,11 @@ def reconstruct():
                 else:
                     g_norm = g - g_mean
 
-                # Fator c (pré-calculado)
                 print(f"[CÁLCULO] Fator de redução c (pré-calculado): {c_factor:.4e}")
 
-                # Coeficiente de regularização (λ)
                 lambda_reg = np.max(np.abs(H_norm_T @ g_norm)) * 0.10
                 print(f"[CÁLCULO] Coeficiente λ: {lambda_reg:.4e}")
 
-                # seleciona e executa algoritmo
                 alg_lower = algorithm.strip().lower()
                 if alg_lower == 'cgne':
                     f, iterations = execute_cgne(H_norm, H_norm_T, g_norm)
@@ -218,17 +200,14 @@ def reconstruct():
                 else:
                     return jsonify({'error': f"Algoritmo {algorithm} desconhecido"}), 400
 
-                # coleta uso de recursos
                 mem = psutil.virtual_memory()
                 cpu = psutil.cpu_percent(interval=None)
 
-                # de-normalização
                 if H_std > 1e-12:
                     f_final = f * (g_std / H_std)
                 else:
                     f_final = f
 
-                # geração da imagem (clipping e normalização para 0-255)
                 f_clipped = np.clip(f_final, 0, None)
                 f_max = f_clipped.max()
                 if f_max > 1e-12:
@@ -236,7 +215,6 @@ def reconstruct():
                 else:
                     f_norm = np.zeros_like(f_clipped)
 
-                # tenta reconstruir matriz quadrada (coluna-major, order='F' para compatibilidade)
                 n_pixels = len(f_norm)
                 lado = int(np.floor(np.sqrt(n_pixels)))
                 if lado * lado == 0:

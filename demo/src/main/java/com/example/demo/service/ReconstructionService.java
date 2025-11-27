@@ -48,23 +48,12 @@ public class ReconstructionService {
     private record AlgorithmResult(INDArray f, int iterations) {
     }
 
-    /**
-     * Novo método público usado pelo controller.
-     *
-     * @param rawSignal bytes contendo float32 little-endian (np.float32.tobytes())
-     * @param modelName nome do modelo pré-carregado (ex: H_30x30.csv)
-     * @param algorithm "CGNE" ou "CGNR"
-     * @param tamanho   (opcional) número de amostras esperadas
-     * @param ganho     (opcional) string com ganho para logging
-     * @return ImageResult com PNG e metadados
-     */
     public ImageResult reconstruct(byte[] rawSignal, String modelName, String algorithm, Integer tamanho, String ganho) {
         logger.info("Iniciando reconstrução. Modelo={}, Alg={}, TamanhoHeader={}, Ganho={}",
                 modelName, algorithm, tamanho, ganho);
         LocalDateTime startTime = LocalDateTime.now();
         long startNanos = System.nanoTime();
 
-        // 1) recuperar modelo do cache
         Object modelDataObj = dataCacheService.getData(modelName);
         if (!(modelDataObj instanceof DataCacheService.PrecalculatedModel modelData)) {
             throw new IllegalArgumentException("Modelo " + modelName + " não encontrado no cache ou tipo inválido.");
@@ -74,17 +63,14 @@ public class ReconstructionService {
         double H_std = modelData.H_std();
         double c_factor = modelData.c_factor();
 
-        // 2) converter rawSignal (bytes) -> float[] (little-endian)
         float[] floatArr = bytesToFloatArrayLE(rawSignal);
         if (tamanho != null && tamanho.intValue() != floatArr.length) {
             throw new IllegalArgumentException("Tamanho incorreto do sinal: esperado " + tamanho + ", recebido " + floatArr.length);
         }
 
-        // 3) criar INDArray g (coluna) e cast para DOUBLE para os cálculos
-        INDArray gFloat = Nd4j.createFromArray(floatArr); // 1D float
-        INDArray g = gFloat.castTo(DataType.DOUBLE).reshape(gFloat.length(), 1); // (n,1) double
+        INDArray gFloat = Nd4j.createFromArray(floatArr); 
+        INDArray g = gFloat.castTo(DataType.DOUBLE).reshape(gFloat.length(), 1); 
 
-        // 4) normalização do sinal (igual ao Python)
         double g_mean = g.meanNumber().doubleValue();
         double g_std = g.stdNumber().doubleValue();
         INDArray g_norm;
@@ -95,12 +81,10 @@ public class ReconstructionService {
             g_norm = g.sub(g_mean);
         }
 
-        // 5) cálculo do lambda_reg (para log)
         double lambda_reg = Transforms.abs(H_norm_T.mmul(g_norm)).maxNumber().doubleValue() * 0.10;
         logger.info("[CÁLCULO] Coeficiente λ: {}", String.format("%.4e", lambda_reg));
         logger.info("[CÁLCULO] Fator c (pré-calculado): {}", String.format("%.4e", c_factor));
 
-        // 6) executar algoritmo escolhido
         AlgorithmResult algResult;
         String algLower = algorithm.trim().toLowerCase();
         if ("cgne".equals(algLower)) {
@@ -114,12 +98,10 @@ public class ReconstructionService {
         INDArray f = algResult.f();
         int iterations = algResult.iterations();
 
-        // 7) coletar recursos
         double cpuPercent = getCpuUsage();
         GlobalMemory memory = systemInfo.getHardware().getMemory();
         double memPercent = (memory.getTotal() - memory.getAvailable()) * 100.0 / memory.getTotal();
 
-        // 8) de-normalização (mesma lógica)
         INDArray f_final;
         if (H_std > 1e-12) {
             f_final = f.mul(g_std / H_std);
@@ -127,7 +109,6 @@ public class ReconstructionService {
             f_final = f;
         }
 
-        // 9) clipping e normalização final para 0-255
         INDArray f_clipped = Transforms.relu(f_final);
         double f_max = f_clipped.maxNumber().doubleValue();
         INDArray f_norm;
@@ -137,23 +118,19 @@ public class ReconstructionService {
             f_norm = Nd4j.zeros(f_clipped.shape());
         }
 
-        // 10) montar imagem (coluna-major -> order='F' equivalente)
         long n_pixels = f_norm.length();
         int lado = (int) Math.floor(Math.sqrt(n_pixels));
         if (lado * lado <= 0) {
             throw new RuntimeException("Tamanho do vetor de reconstrução inválido: " + n_pixels);
         }
 
-        // extrair valores em double para popular a imagem
-        double[] pixels = f_norm.data().asDouble(); // pode ser grande, mas necessário para criação de PNG
-        // montar array 2D coluna-major (compatible with Python's order='F')
+        double[] pixels = f_norm.data().asDouble(); 
         byte[] pngData = createPngFromColumnMajorDouble(pixels, lado, lado);
 
         LocalDateTime endTime = LocalDateTime.now();
         long endNanos = System.nanoTime();
         double durationSeconds = (endNanos - startNanos) / 1_000_000_000.0;
 
-        // 11) retornar ImageResult (assuma que ImageResult tem este construtor/record)
         ImageResult result = new ImageResult(
                 pngData,
                 algorithm,
@@ -169,12 +146,7 @@ public class ReconstructionService {
         return result;
     }
 
-    // ---------------------------
-    // Métodos auxiliares
-    // ---------------------------
-
     private AlgorithmResult executeCgne(INDArray H_norm, INDArray H_norm_T, INDArray g_norm) {
-        // shapes: H_norm is (m,n); g_norm is (m,1); want f of size (n,1)
         int n = (int) H_norm.columns();
         INDArray f = Nd4j.zeros(DataType.DOUBLE, n, 1);
         INDArray r = g_norm.dup();
@@ -261,7 +233,6 @@ public class ReconstructionService {
     }
 
     private float[] bytesToFloatArrayLE(byte[] raw) {
-        // interpreta os bytes como float32 little-endian
         ByteBuffer bb = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN);
         FloatBuffer fb = bb.asFloatBuffer();
         float[] arr = new float[fb.remaining()];
@@ -270,16 +241,12 @@ public class ReconstructionService {
     }
 
     private byte[] createPngFromColumnMajorDouble(double[] pixelsColumnMajor, int width, int height) {
-        // pixelsColumnMajor tem dimensão width*height no formato coluna-major (order='F').
-        // Precisamos popular a imagem em (x,y) tal que x coluna e y linha.
         BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY);
 
-        // pixelsColumnMajor[k] correspondia à posição (col, row) usando traversal coluna-major:
-        // índice k = col * height + row
         int total = width * height;
         for (int k = 0; k < Math.min(total, pixelsColumnMajor.length); k++) {
-            int col = k / height;   // x
-            int row = k % height;   // y
+            int col = k / height;   
+            int row = k % height;   
             int gray = (int) Math.round(pixelsColumnMajor[k]);
             gray = Math.max(0, Math.min(255, gray));
             image.getRaster().setSample(col, row, 0, gray);
