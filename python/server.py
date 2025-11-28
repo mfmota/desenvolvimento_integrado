@@ -8,8 +8,8 @@ import datetime
 from flask import Flask, request, jsonify, send_file, make_response
 
 app = Flask(__name__)
-semaforo_clientes = threading.Semaphore(2)
-semaforo_processos = threading.Semaphore(5)
+semaforo_clientes = threading.Semaphore(20)
+semaforo_processos = threading.Semaphore(4)
 
 DATA_CACHE = {}
 MODEL_FILES = ['H_60x60.csv', 'H_30x30.csv']

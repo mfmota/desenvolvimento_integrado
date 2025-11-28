@@ -18,8 +18,6 @@ ALGORITHM = ['CGNE', 'CGNR']
 
 def make_request(target_url, server_tag, sinal_bin, tamanho, model, signal, algorithm, gain):
     try:
-        print(f"[REQUISIÇÃO] Enviando para {server_tag.upper()}...")
-
         headers = {
             "Content-Type": "application/octet-stream",
             "X-Modelo": model,
@@ -53,7 +51,7 @@ def make_request(target_url, server_tag, sinal_bin, tamanho, model, signal, algo
             uso_mem = resp.headers.get('X-Mem', '')
 
             with file_lock:
-                with open('relatorio_imagens.txt', 'a') as f:
+                with open('relatorio_imagens.txt', 'a') as f: 
                     f.write(
                         f"{image_name} - Arquivo: {alg}, "
                         f"Inicio: {start}, Fim: {finish}, Tamanho: {size}, "
@@ -63,12 +61,12 @@ def make_request(target_url, server_tag, sinal_bin, tamanho, model, signal, algo
                     )
 
             with file_lock:
-                with open('relatorio_desempenho.txt', 'a') as f:
+                with open('relatorio_desempenho.txt', 'a') as f: 
                     f.write(
                         f"[{finish}] Servidor: {server_tag.upper()}, CPU: {uso_cpu}%, Memória: {uso_mem}%\n"
                     )
 
-            print(f"[SUCESSO] {server_tag.upper()} - Imagem salva.")
+            print(f"[SUCESSO] {server_tag.upper()} - {image_name} salva em {req_duration:.2f}s")
 
         else:
             print(f"[ERRO] {server_tag.upper()} - Resposta: {resp.status_code} - {resp.text}")
@@ -77,7 +75,7 @@ def make_request(target_url, server_tag, sinal_bin, tamanho, model, signal, algo
         print(f"[ERRO] {server_tag.upper()} - Falha na comunicação: {e}")
 
 
-def send_signal():
+def send_signal(index): 
     model = random.choice(MODELS)
     gain = "Dinâmico"
 
@@ -87,64 +85,68 @@ def send_signal():
         filename = random.choice(SIGNAL30)
 
     signal_array = np.loadtxt(filename, delimiter=",").flatten()[:, np.newaxis]
-
-    S = signal_array.shape[0]
-
     
-    #l_indices = np.arange(1, S + 1, dtype=np.float64) 
-    #gamma_vector = 100.0 + (1.0 / 20.0) * l_indices * np.sqrt(l_indices)
-    #gamma_vector_reshaped = gamma_vector[:, np.newaxis]
-    #signal_gain = signal_array * gamma_vector_reshaped
-
-    #sinal_bin = signal_gain.astype(np.float32).tobytes()
-    #tamanho = len(signal_gain)
+    S = signal_array.shape[0] 
+    l_indices = np.arange(1, S + 1, dtype=np.float64)
+    gamma_vector = 100.0 + (1.0 / 20.0) * l_indices * np.sqrt(l_indices)
     
-    sinal_bin = signal_array.astype(np.float32).tobytes()
-    tamanho = len(signal_array)
+    signal_gain = signal_gain * gamma_vector
+    sinal_bin = signal_gain.astype(np.float32).tobytes()
+    tamanho = len(signal_gain)
+    
+    gain_str = "Formula_l_sqrt_l" 
 
-    print(f"\n[ENVIO] Modelo: {model}, Sinal: {filename}, Ganho: {gain}")
+    print(f"[DISPARO {index}] Preparando threads para {filename}...")
+
+    threads_criadas = []
 
     for algorithm in ALGORITHM:
         thread_python = threading.Thread(
             target=make_request,
-            args=(URL_PYTHON_SERVER, "python", sinal_bin, tamanho, model, filename, algorithm, gain)
+            args=(URL_PYTHON_SERVER, "python", sinal_bin, tamanho, model, filename, algorithm, gain_str)
         )
 
         thread_java = threading.Thread(
             target=make_request,
-            args=(URL_JAVA_SERVER, "java", sinal_bin, tamanho, model, filename, algorithm, gain)
+            args=(URL_JAVA_SERVER, "java", sinal_bin, tamanho, model, filename, algorithm, gain_str)
         )
 
         thread_python.start()
         thread_java.start()
 
-        thread_python.join()
-        thread_java.join()
+        threads_criadas.append(thread_python)
+        threads_criadas.append(thread_java)
 
-    print(f"[ENVIO CONCLUÍDO] {filename} (com ganho γ={gain})")
+    return threads_criadas
 
-
-def executar_cliente(num_sinais=5):
-    print("=== CLIENTE INICIADO ===")
-
-    for arq in ['relatorio_imagens.txt', 'relatorio_desempenho.txt']:
-        if os.path.exists(arq):
-            os.remove(arq)
+def executar_cliente(num_sinais=10):
+    print(f"=== INICIANDO TESTE DE CARGA: {num_sinais} SINAIS ===")
+    print(f"Total esperado de requisições: {num_sinais * 2 * 2} (2 servidores x 2 algs)")
 
     with open('relatorio_imagens.txt', 'w') as f:
         f.write("=== RELATÓRIO ===\n")
-        f.write(f"{datetime.datetime.now()}\n\n")
+        f.write(f"Inicio Teste: {datetime.datetime.now()}\n\n")
 
     with open('relatorio_desempenho.txt', 'w') as f:
         f.write("=== DESEMPENHO ===\n")
-        f.write(f"{datetime.datetime.now()}\n\n")
+        f.write(f"Inicio Teste: {datetime.datetime.now()}\n\n")
+
+    all_threads = []
+    start_time = time.time()
 
     for i in range(num_sinais):
-        print(f"\n--- Enviando sinal {i+1}/{num_sinais} ---")
-        send_signal()
-        if i < num_sinais - 1:
-            t = random.uniform(1, 3)
-            print(f"[INTERVALO] Aguardando {t:.1f}s...")
-            time.sleep(t)
+        novas_threads = send_signal(i+1) 
+        all_threads.extend(novas_threads)
+        time.sleep(0.1)
 
-    print("=== EXECUÇÃO FINALIZADA ===")
+    print(f"\n=== TODOS OS SINAIS FORAM DISPARADOS ===")
+    print(f"=== AGUARDANDO RETORNO DAS {len(all_threads)} THREADS... ===\n")
+
+    for t in all_threads:
+        t.join()
+
+    total_time = time.time() - start_time
+    print(f"=== TESTE DE CARGA FINALIZADO EM {total_time:.2f} SEGUNDOS ===")
+
+if __name__ == "__main__":
+    executar_cliente()

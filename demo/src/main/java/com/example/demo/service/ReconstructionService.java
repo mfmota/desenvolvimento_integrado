@@ -12,7 +12,7 @@ import org.springframework.stereotype.Service;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import javax.imageio.ImageIO;
-
+import java.util.concurrent.Semaphore;
 import oshi.SystemInfo;
 import oshi.hardware.CentralProcessor;
 import oshi.hardware.GlobalMemory;
@@ -30,6 +30,7 @@ public class ReconstructionService {
     private final DataCacheService dataCacheService;
     private final SystemInfo systemInfo;
     private final CentralProcessor processor;
+    private final Semaphore processingSemaphore = new Semaphore(4);
 
     private final ReentrantLock cpuLock = new ReentrantLock();
     private long[] prevTicks;
@@ -51,99 +52,109 @@ public class ReconstructionService {
     public ImageResult reconstruct(byte[] rawSignal, String modelName, String algorithm, Integer tamanho, String ganho) {
         logger.info("Iniciando reconstrução. Modelo={}, Alg={}, TamanhoHeader={}, Ganho={}",
                 modelName, algorithm, tamanho, ganho);
-        LocalDateTime startTime = LocalDateTime.now();
-        long startNanos = System.nanoTime();
 
-        Object modelDataObj = dataCacheService.getData(modelName);
-        if (!(modelDataObj instanceof DataCacheService.PrecalculatedModel modelData)) {
-            throw new IllegalArgumentException("Modelo " + modelName + " não encontrado no cache ou tipo inválido.");
+        try{
+
+            processingSemaphore.acquire();
+            LocalDateTime startTime = LocalDateTime.now();
+            long startNanos = System.nanoTime();
+
+            Object modelDataObj = dataCacheService.getData(modelName);
+            if (!(modelDataObj instanceof DataCacheService.PrecalculatedModel modelData)) {
+                throw new IllegalArgumentException("Modelo " + modelName + " não encontrado no cache ou tipo inválido.");
+            }
+            INDArray H_norm = modelData.H_norm();
+            INDArray H_norm_T = modelData.H_norm_T();
+            double H_std = modelData.H_std();
+            double c_factor = modelData.c_factor();
+
+            float[] floatArr = bytesToFloatArrayLE(rawSignal);
+            if (tamanho != null && tamanho.intValue() != floatArr.length) {
+                throw new IllegalArgumentException("Tamanho incorreto do sinal: esperado " + tamanho + ", recebido " + floatArr.length);
+            }
+
+            INDArray gFloat = Nd4j.createFromArray(floatArr); 
+            INDArray g = gFloat.castTo(DataType.DOUBLE).reshape(gFloat.length(), 1); 
+
+            double g_mean = g.meanNumber().doubleValue();
+            double g_std = g.stdNumber().doubleValue();
+            INDArray g_norm;
+            if (g_std > 1e-12) {
+                g_norm = g.sub(g_mean).div(g_std);
+            } else {
+                logger.warn("Desvio padrão muito pequeno no sinal; usando normalização parcial.");
+                g_norm = g.sub(g_mean);
+            }
+
+            double lambda_reg = Transforms.abs(H_norm_T.mmul(g_norm)).maxNumber().doubleValue() * 0.10;
+            logger.info("[CÁLCULO] Coeficiente λ: {}", String.format("%.4e", lambda_reg));
+            logger.info("[CÁLCULO] Fator c (pré-calculado): {}", String.format("%.4e", c_factor));
+
+            AlgorithmResult algResult;
+            String algLower = algorithm.trim().toLowerCase();
+            if ("cgne".equals(algLower)) {
+                algResult = executeCgne(H_norm, H_norm_T, g_norm);
+            } else if ("cgnr".equals(algLower)) {
+                algResult = executeCgnr(H_norm, H_norm_T, g_norm);
+            } else {
+                throw new IllegalArgumentException("Algoritmo desconhecido: " + algorithm);
+            }
+
+            INDArray f = algResult.f();
+            int iterations = algResult.iterations();
+
+            double cpuPercent = getCpuUsage();
+            GlobalMemory memory = systemInfo.getHardware().getMemory();
+            double memPercent = (memory.getTotal() - memory.getAvailable()) * 100.0 / memory.getTotal();
+
+            INDArray f_final;
+            if (H_std > 1e-12) {
+                f_final = f.mul(g_std / H_std);
+            } else {
+                f_final = f;
+            }
+
+            INDArray f_clipped = Transforms.relu(f_final);
+            double f_max = f_clipped.maxNumber().doubleValue();
+            INDArray f_norm;
+            if (f_max > 1e-12) {
+                f_norm = f_clipped.div(f_max).mul(255.0);
+            } else {
+                f_norm = Nd4j.zeros(f_clipped.shape());
+            }
+
+            long n_pixels = f_norm.length();
+            int lado = (int) Math.floor(Math.sqrt(n_pixels));
+            if (lado * lado <= 0) {
+                throw new RuntimeException("Tamanho do vetor de reconstrução inválido: " + n_pixels);
+            }
+
+            double[] pixels = f_norm.data().asDouble(); 
+            byte[] pngData = createPngFromColumnMajorDouble(pixels, lado, lado);
+
+            LocalDateTime endTime = LocalDateTime.now();
+            long endNanos = System.nanoTime();
+            double durationSeconds = (endNanos - startNanos) / 1_000_000_000.0;
+
+            ImageResult result = new ImageResult(
+                    pngData,
+                    algorithm,
+                    lado + "x" + lado,
+                    iterations,
+                    durationSeconds,
+                    cpuPercent,
+                    memPercent,
+                    startTime,
+                    endTime
+            );
+
+            return result;
+        }catch(InterruptedException e){
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Erro de concorrência: interrompido enquanto aguardava semáforo",e);
+        }finally{
+            processingSemaphore.release();
         }
-        INDArray H_norm = modelData.H_norm();
-        INDArray H_norm_T = modelData.H_norm_T();
-        double H_std = modelData.H_std();
-        double c_factor = modelData.c_factor();
-
-        float[] floatArr = bytesToFloatArrayLE(rawSignal);
-        if (tamanho != null && tamanho.intValue() != floatArr.length) {
-            throw new IllegalArgumentException("Tamanho incorreto do sinal: esperado " + tamanho + ", recebido " + floatArr.length);
-        }
-
-        INDArray gFloat = Nd4j.createFromArray(floatArr); 
-        INDArray g = gFloat.castTo(DataType.DOUBLE).reshape(gFloat.length(), 1); 
-
-        double g_mean = g.meanNumber().doubleValue();
-        double g_std = g.stdNumber().doubleValue();
-        INDArray g_norm;
-        if (g_std > 1e-12) {
-            g_norm = g.sub(g_mean).div(g_std);
-        } else {
-            logger.warn("Desvio padrão muito pequeno no sinal; usando normalização parcial.");
-            g_norm = g.sub(g_mean);
-        }
-
-        double lambda_reg = Transforms.abs(H_norm_T.mmul(g_norm)).maxNumber().doubleValue() * 0.10;
-        logger.info("[CÁLCULO] Coeficiente λ: {}", String.format("%.4e", lambda_reg));
-        logger.info("[CÁLCULO] Fator c (pré-calculado): {}", String.format("%.4e", c_factor));
-
-        AlgorithmResult algResult;
-        String algLower = algorithm.trim().toLowerCase();
-        if ("cgne".equals(algLower)) {
-            algResult = executeCgne(H_norm, H_norm_T, g_norm);
-        } else if ("cgnr".equals(algLower)) {
-            algResult = executeCgnr(H_norm, H_norm_T, g_norm);
-        } else {
-            throw new IllegalArgumentException("Algoritmo desconhecido: " + algorithm);
-        }
-
-        INDArray f = algResult.f();
-        int iterations = algResult.iterations();
-
-        double cpuPercent = getCpuUsage();
-        GlobalMemory memory = systemInfo.getHardware().getMemory();
-        double memPercent = (memory.getTotal() - memory.getAvailable()) * 100.0 / memory.getTotal();
-
-        INDArray f_final;
-        if (H_std > 1e-12) {
-            f_final = f.mul(g_std / H_std);
-        } else {
-            f_final = f;
-        }
-
-        INDArray f_clipped = Transforms.relu(f_final);
-        double f_max = f_clipped.maxNumber().doubleValue();
-        INDArray f_norm;
-        if (f_max > 1e-12) {
-            f_norm = f_clipped.div(f_max).mul(255.0);
-        } else {
-            f_norm = Nd4j.zeros(f_clipped.shape());
-        }
-
-        long n_pixels = f_norm.length();
-        int lado = (int) Math.floor(Math.sqrt(n_pixels));
-        if (lado * lado <= 0) {
-            throw new RuntimeException("Tamanho do vetor de reconstrução inválido: " + n_pixels);
-        }
-
-        double[] pixels = f_norm.data().asDouble(); 
-        byte[] pngData = createPngFromColumnMajorDouble(pixels, lado, lado);
-
-        LocalDateTime endTime = LocalDateTime.now();
-        long endNanos = System.nanoTime();
-        double durationSeconds = (endNanos - startNanos) / 1_000_000_000.0;
-
-        ImageResult result = new ImageResult(
-                pngData,
-                algorithm,
-                lado + "x" + lado,
-                iterations,
-                durationSeconds,
-                cpuPercent,
-                memPercent,
-                startTime,
-                endTime
-        );
-
-        return result;
     }
 
     private AlgorithmResult executeCgne(INDArray H_norm, INDArray H_norm_T, INDArray g_norm) {
