@@ -1,43 +1,11 @@
 === DESEMPENHO ===
-Inicio Teste: 2025-11-28 10:32:00.852363
+Inicio Teste: 2025-11-28 15:16:37.378537
 
-[2025-11-28 10:32:21] Servidor: PYTHON, CPU: 100.0%, Memória: 91.4%
-[2025-11-28 10:32:21] Servidor: PYTHON, CPU: 0.0%, Memória: 92.1%
-[2025-11-28 10:32:21] Servidor: PYTHON, CPU: 0.0%, Memória: 92.2%
-[2025-11-28 10:32:22] Servidor: PYTHON, CPU: 0.0%, Memória: 92.1%
-[2025-11-28 10:32:22] Servidor: PYTHON, CPU: 0.0%, Memória: 92.0%
-[2025-11-28 10:32:23] Servidor: PYTHON, CPU: 0.0%, Memória: 92.6%
-[2025-11-28 10:32:23] Servidor: PYTHON, CPU: 0.0%, Memória: 92.6%
-[2025-11-28 10:32:24] Servidor: PYTHON, CPU: 0.0%, Memória: 92.8%
-[2025-11-28 10:32:29] Servidor: PYTHON, CPU: 0.0%, Memória: 92.7%
-[2025-11-28 10:32:30] Servidor: PYTHON, CPU: 0.0%, Memória: 93.3%
-[2025-11-28 10:32:32] Servidor: PYTHON, CPU: 0.0%, Memória: 90.7%
-[2025-11-28 10:32:32] Servidor: PYTHON, CPU: 0.0%, Memória: 90.8%
-[2025-11-28 10:32:35] Servidor: PYTHON, CPU: 0.0%, Memória: 92.0%
-[2025-11-28 10:32:35] Servidor: PYTHON, CPU: 0.0%, Memória: 92.0%
-[2025-11-28 10:32:36] Servidor: PYTHON, CPU: 100.0%, Memória: 92.3%
-[2025-11-28 10:32:38] Servidor: PYTHON, CPU: 0.0%, Memória: 91.9%
-[2025-11-28 10:32:38] Servidor: PYTHON, CPU: 0.0%, Memória: 91.9%
-[2025-11-28 10:32:38] Servidor: PYTHON, CPU: 0.0%, Memória: 91.9%
-[2025-11-28 10:32:38] Servidor: PYTHON, CPU: 0.0%, Memória: 91.8%
-[2025-11-28 10:32:38] Servidor: PYTHON, CPU: 0.0%, Memória: 91.8%
-[2025-11-28 10:32:43] Servidor: JAVA, CPU: 0,0%, Memória: 92,8%
-[2025-11-28 10:32:43] Servidor: JAVA, CPU: 43,5%, Memória: 92,4%
-[2025-11-28 10:32:43] Servidor: JAVA, CPU: 100,0%, Memória: 92,8%
-[2025-11-28 10:32:43] Servidor: JAVA, CPU: 0,0%, Memória: 92,4%
-[2025-11-28 10:32:46] Servidor: JAVA, CPU: 100,0%, Memória: 91,6%
-[2025-11-28 10:32:46] Servidor: JAVA, CPU: 0,0%, Memória: 91,6%
-[2025-11-28 10:32:47] Servidor: JAVA, CPU: 100,0%, Memória: 91,8%
-[2025-11-28 10:32:47] Servidor: JAVA, CPU: 0,0%, Memória: 91,8%
-[2025-11-28 10:33:04] Servidor: JAVA, CPU: 100,0%, Memória: 89,5%
-[2025-11-28 10:33:04] Servidor: JAVA, CPU: 100,0%, Memória: 89,8%
-[2025-11-28 10:33:05] Servidor: JAVA, CPU: 100,0%, Memória: 89,8%
-[2025-11-28 10:33:05] Servidor: JAVA, CPU: 0,0%, Memória: 89,8%
-[2025-11-28 10:33:14] Servidor: JAVA, CPU: 100,0%, Memória: 93,8%
-[2025-11-28 10:33:22] Servidor: JAVA, CPU: 100,0%, Memória: 93,2%
-[2025-11-28 10:33:22] Servidor: JAVA, CPU: 0,0%, Memória: 93,2%
-[2025-11-28 10:33:23] Servidor: JAVA, CPU: 100,0%, Memória: 93,6%
-[2025-11-28 10:33:27] Servidor: JAVA, CPU: 100,0%, Memória: 94,3%
-[2025-11-28 10:33:27] Servidor: JAVA, CPU: 0,0%, Memória: 94,3%
-[2025-11-28 10:33:27] Servidor: JAVA, CPU: 100,0%, Memória: 94,4%
-[2025-11-28 10:33:28] Servidor: JAVA, CPU: 100,0%, Memória: 96,0%
+[2025-11-28 15:16:38] Servidor: JAVA, CPU: 35,6%, Memória: 95,1%
+[2025-11-28 15:16:40] Servidor: PYTHON, CPU: 0.0%, Memória: 95.2%
+[2025-11-28 15:16:56] Servidor: PYTHON, CPU: 0.0%, Memória: 92.2%
+[2025-11-28 15:16:57] Servidor: PYTHON, CPU: 0.0%, Memória: 92.5%
+[2025-11-28 15:16:58] Servidor: PYTHON, CPU: 0.0%, Memória: 95.9%
+[2025-11-28 15:17:01] Servidor: JAVA, CPU: 98,5%, Memória: 93,0%
+[2025-11-28 15:17:05] Servidor: JAVA, CPU: 99,7%, Memória: 92,5%
+[2025-11-28 15:17:05] Servidor: JAVA, CPU: 100,0%, Memória: 92,9%

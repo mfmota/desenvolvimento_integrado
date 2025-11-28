@@ -30,7 +30,7 @@ public class ReconstructionService {
     private final DataCacheService dataCacheService;
     private final SystemInfo systemInfo;
     private final CentralProcessor processor;
-    private final Semaphore processingSemaphore = new Semaphore(4);
+    private final Semaphore processingSemaphore = new Semaphore(2);
 
     private final ReentrantLock cpuLock = new ReentrantLock();
     private long[] prevTicks;
@@ -69,16 +69,15 @@ public class ReconstructionService {
             double c_factor = modelData.c_factor();
 
             float[] floatArr = bytesToFloatArrayLE(rawSignal);
+            INDArray g = Nd4j.createFromArray(floatArr).reshape(floatArr.length, 1).castTo(DataType.DOUBLE);
+
             if (tamanho != null && tamanho.intValue() != floatArr.length) {
                 throw new IllegalArgumentException("Tamanho incorreto do sinal: esperado " + tamanho + ", recebido " + floatArr.length);
             }
-
-            INDArray gFloat = Nd4j.createFromArray(floatArr); 
-            INDArray g = gFloat.castTo(DataType.DOUBLE).reshape(gFloat.length(), 1); 
-
             double g_mean = g.meanNumber().doubleValue();
             double g_std = g.stdNumber().doubleValue();
             INDArray g_norm;
+
             if (g_std > 1e-12) {
                 g_norm = g.sub(g_mean).div(g_std);
             } else {
@@ -86,8 +85,12 @@ public class ReconstructionService {
                 g_norm = g.sub(g_mean);
             }
 
-            double lambda_reg = Transforms.abs(H_norm_T.mmul(g_norm)).maxNumber().doubleValue() * 0.10;
-            logger.info("[CÁLCULO] Coeficiente λ: {}", String.format("%.4e", lambda_reg));
+            INDArray H_T_times_g = H_norm_T.mmul(g_norm); 
+            INDArray abs_val = Transforms.abs(H_T_times_g);
+            double max_val = abs_val.maxNumber().doubleValue(); 
+            double lambda_reg = max_val * 0.10; 
+
+            logger.info("[CÁLCULO] Lambda calculado: {}", String.format("%.4e", lambda_reg));
             logger.info("[CÁLCULO] Fator c (pré-calculado): {}", String.format("%.4e", c_factor));
 
             AlgorithmResult algResult;

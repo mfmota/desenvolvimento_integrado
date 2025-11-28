@@ -9,7 +9,7 @@ from flask import Flask, request, jsonify, send_file, make_response
 
 app = Flask(__name__)
 semaforo_clientes = threading.Semaphore(20)
-semaforo_processos = threading.Semaphore(4)
+semaforo_processos = threading.Semaphore(2)
 
 DATA_CACHE = {}
 MODEL_FILES = ['H_60x60.csv', 'H_30x30.csv']
@@ -45,7 +45,7 @@ def pre_load_models():
     print("=== PRÉ-CARREGAMENTO DE MODELOS CONCLUÍDO ===")
 
 MAX_ITERATIONS = 10
-ERROR_TOLERANCE = 1e-4  
+ERROR_TOLERANCE = 1e-4
 
 def execute_cgne(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
     m, n = H_norm.shape
@@ -107,6 +107,7 @@ def execute_cgnr(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
 
         r_norm_new = np.linalg.norm(r_next, ord=2)
         epsilon = abs(r_norm_new - r_norm_old)
+        
         if epsilon < ERROR_TOLERANCE or r_norm_new < ERROR_TOLERANCE:
             f = f_next
             return f, i + 1
@@ -147,10 +148,9 @@ def reconstruct():
         if not algorithm:
             return jsonify({'error': 'Header X-Alg ausente.'}), 400
 
-        start_time = time.time()
-        start_dt = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
         with semaforo_processos:
+            start_time = time.time()
+            start_dt = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             try:
                 model_data = DATA_CACHE.get(model_name)
                 if model_data is None:
@@ -187,12 +187,11 @@ def reconstruct():
                 else:
                     g_norm = g - g_mean
 
-                print(f"[CÁLCULO] Fator de redução c (pré-calculado): {c_factor:.4e}")
-
                 lambda_reg = np.max(np.abs(H_norm_T @ g_norm)) * 0.10
                 print(f"[CÁLCULO] Coeficiente λ: {lambda_reg:.4e}")
 
                 alg_lower = algorithm.strip().lower()
+                
                 if alg_lower == 'cgne':
                     f, iterations = execute_cgne(H_norm, H_norm_T, g_norm)
                 elif alg_lower == 'cgnr':
@@ -209,7 +208,8 @@ def reconstruct():
                     f_final = f
 
                 f_clipped = np.clip(f_final, 0, None)
-                f_max = f_clipped.max()
+                
+                f_max= f_clipped.max()
                 if f_max > 1e-12:
                     f_norm = (f_clipped / f_max) * 255.0
                 else:
