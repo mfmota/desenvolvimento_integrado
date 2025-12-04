@@ -1,258 +1,271 @@
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 import time
 import numpy as np
 import psutil
 import io
-from PIL import Image
 import threading
 import datetime
 from flask import Flask, request, jsonify, send_file, make_response
+from PIL import Image
+from typing import Tuple, List
 
 app = Flask(__name__)
-semaforo_clientes = threading.Semaphore(20)
-semaforo_processos = threading.Semaphore(2)
 
-DATA_CACHE = {}
+test_rounds = 5
+cpu_cap = 90.0
+active_clients = 0
+waiting_clients = 0
+
+cgnr_cpus: List[float] = []
+cgnr_mems: List[float] = []
+cgne_cpus: List[float] = [] 
+cgne_mems: List[float] = []
+
+FILE_ID_MAP = {
+    'H_60x60.csv': 0, 'H_30x30.csv': 1, 
+    'sinal_1_30x30.csv': 0, 'sinal_2_30x30.csv': 1, 'sinal_3_30x30.csv': 2, 
+    'sinal_1_60x60.csv': 3, 'sinal_2_60x60.csv': 4, 'sinal_3_60x60.csv': 5,
+}
+
+NUM_FILES_TESTED = 7 
+semaphore_files = [threading.Semaphore(1) for _ in range(NUM_FILES_TESTED)]
+semaphore7 = threading.Semaphore(1) 
+
+RAW_MODEL_CACHE = {} 
 MODEL_FILES = ['H_60x60.csv', 'H_30x30.csv']
-
-def pre_load_models():
-    print("=== INICIANDO PRÉ-CARREGAMENTO DE MODELOS ===")
-    for f in MODEL_FILES:
-        try:
-            H = np.loadtxt(f, delimiter=',', dtype=np.float64)
-            H_mean = np.mean(H)
-            H_std = np.std(H)
-            if H_std > 1e-12:
-                H_norm = (H - H_mean) / H_std
-            else:
-                H_norm = H - H_mean
-            H_norm_T = H_norm.T
-            print(f"   -> Calculando 'c' para {f} (pode demorar)...")
-            start_c = time.time()
-            c_factor = np.linalg.norm(H_norm_T @ H_norm, ord=2)
-            end_c = time.time()
-            print(f"   -> 'c' calculado ({c_factor:.4e}) em {end_c - start_c:.2f}s")
-            DATA_CACHE[f] = {
-                'H_norm': H_norm,
-                'H_norm_T': H_norm_T,
-                'H_mean': H_mean,
-                'H_std': H_std,
-                'c_factor': c_factor
-            }
-            print(f" - [CACHE MODELO] {f} processado e armazenado.")
-        except Exception as e:
-            print(f"[ERRO CACHE] Falha ao carregar {f}. Erro: {e}")
-    psutil.cpu_percent(interval=None)
-    print("=== PRÉ-CARREGAMENTO DE MODELOS CONCLUÍDO ===")
-
+CACHE_DIR = "model_cache"
 MAX_ITERATIONS = 10
 ERROR_TOLERANCE = 1e-4
 
-def execute_cgne(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
-    m, n = H_norm.shape
-    f = np.zeros(n, dtype=np.float64)
-    r = g_norm.copy()
-    p = H_norm_T @ r
-    r_norm_old = np.linalg.norm(r, ord=2)
+def load_raw_models_ram():
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+
+    print("=== CARREGANDO MODELOS BRUTOS PARA RAM ===")
+    
+    for csv_file in MODEL_FILES:
+        base_name = os.path.splitext(csv_file)[0]
+        npy_path = os.path.join(CACHE_DIR, f"{base_name}.npy")
+        
+        try:
+            if os.path.exists(npy_path):
+                print(f" -> Lendo binário: {npy_path}")
+                H = np.load(npy_path)
+            else:
+                print(f" -> Convertendo CSV para Binário (1ª vez): {csv_file}")
+                H = np.loadtxt(csv_file, delimiter=',', dtype=np.float64)
+                np.save(npy_path, H)
+
+            RAW_MODEL_CACHE[csv_file] = H.astype(np.float32)
+            
+            print(f" -> {csv_file} carregado na RAM (Bruto).")
+            
+        except Exception as e:
+            print(f"[ERRO] Falha ao carregar {csv_file}: {e}")
+
+    print("=== CARREGAMENTO CONCLUÍDO ===")
+
+def execute_cgne(H, g_norm):
+    H_T = H.T 
+    
+    f = np.zeros(H.shape[1], dtype=np.float32)
+    r = g_norm.astype(np.float32)
+    p = H_T @ r
+    r_norm_old = np.linalg.norm(r)
 
     for i in range(MAX_ITERATIONS):
         p_norm_sq = np.dot(p, p)
-        if p_norm_sq < 1e-20:
-            break
-        alpha = (r_norm_old * r_norm_old) / p_norm_sq 
-        f_next = f + alpha * p
-        q = H_norm @ p
-        r_next = r - alpha * q
+        if p_norm_sq < 1e-15: break
+        
+        alpha = (r_norm_old**2) / p_norm_sq 
+        f = f + alpha * p
+        r = r - alpha * (H @ p)
+        r_norm_new = np.linalg.norm(r)
 
-        r_norm_new = np.linalg.norm(r_next, ord=2)
-        epsilon = abs(r_norm_new - r_norm_old)
-
-        if epsilon < ERROR_TOLERANCE or r_norm_new < ERROR_TOLERANCE:
-            f = f_next
-            return f, i + 1
-
-        r_norm_sq_new = r_norm_new * r_norm_new
-        if (r_norm_old * r_norm_old) < 1e-20:
-            f = f_next
-            return f, i + 1
-
-        beta = r_norm_sq_new / (r_norm_old * r_norm_old)
-        p_next = (H_norm_T @ r_next) + beta * p
-
-        f = f_next
-        r = r_next
-        p = p_next
+        if r_norm_new < ERROR_TOLERANCE: break
+        
+        beta = (r_norm_new**2) / (r_norm_old**2)
+        p = (H_T @ r) + beta * p
         r_norm_old = r_norm_new
+        
+    return f, i + 1
 
-    return f, MAX_ITERATIONS
-
-def execute_cgnr(H_norm: np.ndarray, H_norm_T: np.ndarray, g_norm: np.ndarray):
-    m, n = H_norm.shape
-    f = np.zeros(n, dtype=np.float64)
-    r = g_norm - H_norm @ f
-    z = H_norm_T @ r
+def execute_cgnr(H, g_norm):
+    H_T = H.T
+    
+    f = np.zeros(H.shape[1], dtype=np.float32)
+    r = g_norm.astype(np.float32) - H @ np.zeros(H.shape[1], dtype=np.float32)
+    z = H_T @ r
     p = z.copy()
-
-    r_norm_old = np.linalg.norm(r, ord=2)
-    z_norm_sq_old = np.linalg.norm(z, ord=2) ** 2
+    z_norm_sq_old = np.linalg.norm(z)**2
 
     for i in range(MAX_ITERATIONS):
-        w = H_norm @ p
-        w_norm_sq = np.linalg.norm(w, ord=2) ** 2
-        if w_norm_sq < 1e-20:
-            break
+        w = H @ p
+        w_norm_sq = np.linalg.norm(w)**2
+        if w_norm_sq < 1e-15: break
 
         alpha = z_norm_sq_old / w_norm_sq
-        f_next = f + alpha * p
-        r_next = r - alpha * w
-
-        r_norm_new = np.linalg.norm(r_next, ord=2)
-        epsilon = abs(r_norm_new - r_norm_old)
+        f = f + alpha * p
+        r = r - alpha * w
         
-        if epsilon < ERROR_TOLERANCE or r_norm_new < ERROR_TOLERANCE:
-            f = f_next
-            return f, i + 1
-
-        z_next = H_norm_T @ r_next
-        z_norm_sq_new = np.linalg.norm(z_next, ord=2) ** 2
-
-        if z_norm_sq_old < 1e-20:
-            f = f_next
-            return f, i + 1
+        z_next = H_T @ r
+        z_norm_sq_new = np.linalg.norm(z_next)**2
+        
+        if z_norm_sq_new < 1e-15: break
 
         beta = z_norm_sq_new / z_norm_sq_old
-        p_next = z_next + beta * p
-
-        f = f_next
-        r = r_next
-        z = z_next
-        p = p_next
-        r_norm_old = r_norm_new
+        p = z_next + beta * p
         z_norm_sq_old = z_norm_sq_new
 
-    return f, MAX_ITERATIONS
+    return f, i + 1
+
+def _execute_alg_for_measurement(H_raw, g_raw, alg_name):
+    start_measure = time.time()
+    
+    H_mean = np.mean(H_raw)
+    H_std = np.std(H_raw)
+    H_norm = (H_raw - H_mean) / H_std if H_std > 1e-12 else H_raw - H_mean
+    
+    g_mean = np.mean(g_raw)
+    g_std = np.std(g_raw)
+    g_norm = (g_raw - g_mean) / g_std if g_std > 1e-12 else g_raw - g_mean
+    
+    if alg_name == 'cgne':
+        execute_cgne(H_norm, g_norm) 
+    else:
+        execute_cgnr(H_norm, g_norm)
+
+    cpu_measure = psutil.cpu_percent(interval=None)
+    mem_measure = psutil.virtual_memory().percent
+    
+    return cpu_measure, mem_measure
+
+def determine_cpu_mem():
+    global cgnr_cpus, cgnr_mems, cgne_cpus, cgne_mems
+    
+    if not RAW_MODEL_CACHE: return
+
+    print("\n=== CALIBRANDO COM DADOS BRUTOS (Inclui tempo de cálculo matemático) ===")
+    
+    H_raw = RAW_MODEL_CACHE.get('H_60x60.csv', RAW_MODEL_CACHE.get('H_30x30.csv'))
+
+    g_dummy = np.random.rand(H_raw.shape[0]).astype(np.float32)
+
+    c_cpu, c_mem = _execute_alg_for_measurement(H_raw, g_dummy, 'cgnr')
+    cgnr_cpus = [c_cpu] * NUM_FILES_TESTED
+    cgnr_mems = [c_mem] * NUM_FILES_TESTED
+    print(f" -> Estimativa CGNR (Total): CPU~{c_cpu:.1f}%")
+
+    c_cpu, c_mem = _execute_alg_for_measurement(H_raw, g_dummy, 'cgne')
+    cgne_cpus = [c_cpu] * NUM_FILES_TESTED
+    cgne_mems = [c_mem] * NUM_FILES_TESTED
+    print(f" -> Estimativa CGNE (Total): CPU~{c_cpu:.1f}%")
+
+def client_wait(file_name, alg):
+    global active_clients, waiting_clients
+    permit = False
+    
+    resource_id = FILE_ID_MAP.get(file_name, 0)
+    semaphore = semaphore_files[resource_id]
+    semaphore.acquire()
+    
+    while not permit:
+        semaphore7.acquire()
+        current_cpu = psutil.cpu_percent(interval=None)
+        
+        if alg.lower() == 'cgnr':
+            est = cgnr_cpus[0] if cgnr_cpus else 20.0
+        else:
+            est = cgne_cpus[0] if cgne_cpus else 20.0
+            
+        if active_clients == 0 or (current_cpu + est < cpu_cap * 1.3):
+            permit = True
+        
+        semaphore7.release()
+        if not permit: time.sleep(1)
+            
+    waiting_clients -= 1
+    return resource_id
 
 @app.post("/interpretedServer/reconstruct")
 def reconstruct():
-    with semaforo_clientes:
-        content_type = request.headers.get('Content-Type', '')
-        if not content_type.startswith('application/octet-stream'):
-            return jsonify({'error': 'Este servidor aceita apenas application/octet-stream (binário puro).'}), 400
+    global active_clients, waiting_clients
+    
+    model_name = request.headers.get('X-Modelo')
+    algorithm = request.headers.get('X-Alg') or request.headers.get('X-Algoritmo')
+    ganho_header = request.headers.get('X-Ganho')
 
-        model_name = request.headers.get('X-Modelo')
-        algorithm = request.headers.get('X-Alg') or request.headers.get('X-Algoritmo')
-        tamanho_header = request.headers.get('X-Tamanho')
-        ganho_header = request.headers.get('X-Ganho')
+    if not model_name or not algorithm: return jsonify({'error': 'Headers erro'}), 400
 
-        if not model_name:
-            return jsonify({'error': 'Header X-Modelo ausente.'}), 400
-        if not algorithm:
-            return jsonify({'error': 'Header X-Alg ausente.'}), 400
+    waiting_clients += 1
+    resource_id = client_wait(model_name, algorithm)
+    active_clients += 1
+    
+    start_time = time.time()
+    start_dt = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        with semaforo_processos:
-            start_time = time.time()
-            start_dt = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            try:
-                model_data = DATA_CACHE.get(model_name)
-                if model_data is None:
-                    return jsonify({'error': f"Modelo {model_name} não encontrado no cache."}), 404
+    try:
+        H_raw = RAW_MODEL_CACHE.get(model_name)
+        if H_raw is None: return jsonify({'error': 'Modelo off'}), 404
 
-                H_norm = model_data['H_norm']
-                H_norm_T = model_data['H_norm_T']
-                H_std = model_data['H_std']
-                c_factor = model_data['c_factor']
+        raw_bytes = request.get_data()
+        g_raw = np.frombuffer(raw_bytes, dtype=np.float32)
 
-                raw_bytes = request.get_data()
-                if not raw_bytes:
-                    return jsonify({'error': 'Corpo binário vazio.'}), 400
+        H_mean = np.mean(H_raw)
+        H_std = np.std(H_raw)
+        
+        if H_std > 1e-12:
+            H_norm = (H_raw - H_mean) / H_std
+        else:
+            H_norm = H_raw - H_mean
+            
+        g_mean = np.mean(g_raw)
+        g_std = np.std(g_raw)
+        g_norm = (g_raw - g_mean) / g_std if g_std > 1e-12 else g_raw - g_mean
 
-                try:
-                    sinal_float32 = np.frombuffer(raw_bytes, dtype=np.float32)
-                except Exception as e:
-                    return jsonify({'error': f'Falha ao decodificar bytes para float32: {e}'}), 400
+        if algorithm.lower() == 'cgne':
+            f, its = execute_cgne(H_norm, g_norm)
+        else:
+            f, its = execute_cgnr(H_norm, g_norm)
 
-                if tamanho_header:
-                    try:
-                        expected_len = int(tamanho_header)
-                        if expected_len != len(sinal_float32):
-                            return jsonify({'error': f"Tamanho incorreto: esperado {expected_len}, recebi {len(sinal_float32)}"}), 400
-                    except ValueError:
-                        pass
+        if H_std > 1e-12:
+            f = f * (g_std / H_std)
+            
+        f_clipped = np.clip(f, 0, None)
+        f_max = f_clipped.max()
+        f_norm_img = (f_clipped / f_max * 255.0) if f_max > 1e-9 else f_clipped
+        
+        lado = int(np.sqrt(len(f_norm_img)))
+        img_arr = f_norm_img.reshape((lado, lado), order='F').astype(np.uint8)
+        buf = io.BytesIO()
+        Image.fromarray(img_arr).save(buf, format='PNG')
+        buf.seek(0)
+        
+        end_time = time.time()
+        
+        resp = make_response(send_file(buf, mimetype='image/png'))
+        resp.headers['X-Tempo'] = f"{end_time - start_time:.4f}"
+        resp.headers['X-Algoritmo'] = algorithm
+        resp.headers['X-Iteracoes'] = str(its)
+        resp.headers['X-Cpu'] = str(psutil.cpu_percent(interval=None))
+        resp.headers['X-Mem'] = str(psutil.virtual_memory().percent)
+        if ganho_header: resp.headers['X-Ganho'] = ganho_header
+        
+        return resp
 
-                g = sinal_float32.astype(np.float64)
-
-                g_mean = np.mean(g)
-                g_std = np.std(g)
-                if g_std > 1e-12:
-                    g_norm = (g - g_mean) / g_std
-                else:
-                    g_norm = g - g_mean
-
-                lambda_reg = np.max(np.abs(H_norm_T @ g_norm)) * 0.10
-                print(f"[CÁLCULO] Coeficiente λ: {lambda_reg:.4e}")
-
-                alg_lower = algorithm.strip().lower()
-                
-                if alg_lower == 'cgne':
-                    f, iterations = execute_cgne(H_norm, H_norm_T, g_norm)
-                elif alg_lower == 'cgnr':
-                    f, iterations = execute_cgnr(H_norm, H_norm_T, g_norm)
-                else:
-                    return jsonify({'error': f"Algoritmo {algorithm} desconhecido"}), 400
-
-                mem = psutil.virtual_memory()
-                cpu = psutil.cpu_percent(interval=None)
-
-                if H_std > 1e-12:
-                    f_final = f * (g_std / H_std)
-                else:
-                    f_final = f
-
-                f_clipped = np.clip(f_final, 0, None)
-                
-                f_max= f_clipped.max()
-                if f_max > 1e-12:
-                    f_norm = (f_clipped / f_max) * 255.0
-                else:
-                    f_norm = np.zeros_like(f_clipped)
-
-                n_pixels = len(f_norm)
-                lado = int(np.floor(np.sqrt(n_pixels)))
-                if lado * lado == 0:
-                    return jsonify({'error': 'Tamanho do vetor de reconstrução inválido.'}), 500
-
-                img_array = f_norm[:lado*lado].reshape((lado, lado), order='F')
-                img_array = np.clip(img_array, 0, 255).astype(np.uint8)
-                imagem = Image.fromarray(img_array)
-
-                img_bytes = io.BytesIO()
-                imagem.save(img_bytes, format='PNG')
-                img_bytes.seek(0)
-
-                end_time = time.time()
-                end_dt = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-                response = make_response(send_file(img_bytes, mimetype='image/png', download_name='reconstruida.png'))
-                response.headers['X-Algoritmo'] = algorithm
-                response.headers['X-Inicio'] = start_dt
-                response.headers['X-Fim'] = end_dt
-                response.headers['X-Tamanho'] = f"{lado}x{lado}"
-                response.headers['X-Iteracoes'] = str(iterations)
-                response.headers['X-Tempo'] = str(end_time - start_time)
-                response.headers['X-Cpu'] = str(cpu)
-                response.headers['X-Mem'] = str(mem.percent)
-                if ganho_header:
-                    response.headers['X-Ganho'] = ganho_header
-
-                return response
-
-            except Exception as e:
-                return jsonify({'error': str(e)}), 500
-
-@app.route('/ping', methods=["GET"])
-def ping():
-    return 'OK', 200
+    except Exception as e:
+        print(f"Erro: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        semaphore_files[resource_id].release()
+        active_clients -= 1
 
 if __name__ == '__main__':
-    pre_load_models()
-    print("Iniciando servidor Flask (desenvolvimento) - ouvindo na porta 5000")
+    load_raw_models_ram()
+    determine_cpu_mem()
+    print("Servidor Pronto. (Cálculos em tempo real)")
     app.run(host='0.0.0.0', port=5000, threaded=True)

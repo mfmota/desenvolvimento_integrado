@@ -30,7 +30,7 @@ public class ReconstructionService {
     private final DataCacheService dataCacheService;
     private final SystemInfo systemInfo;
     private final CentralProcessor processor;
-    private final Semaphore processingSemaphore = new Semaphore(2);
+    private final Semaphore processingSemaphore = new Semaphore(5);
 
     private final ReentrantLock cpuLock = new ReentrantLock();
     private long[] prevTicks;

@@ -3,6 +3,7 @@ package com.example.demo.service;
 import jakarta.annotation.PostConstruct;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.factory.Nd4j;
+//operações de tranposta sem usar mais memória
 import org.nd4j.linalg.api.buffer.DataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
